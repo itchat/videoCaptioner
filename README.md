@@ -28,6 +28,6 @@ Currently only supports build on Apple M series architecture platform
 ## ToDo
 
 - [ ] Optimize code structure
-- [ x ] Internationalize desc
+- [x] Internationalize desc
 - [ ] Add target language select option
 - [ ] Multiple platform support
