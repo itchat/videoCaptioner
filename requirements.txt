@@ -1,0 +1,6 @@
+PyQt5
+qt-material
+faster-whisper
+requests
+py2app
+deep-translator
