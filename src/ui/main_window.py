@@ -1,14 +1,24 @@
 from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QComboBox, QScrollArea, QMessageBox
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QComboBox,
+    QScrollArea,
+    QMessageBox,
+    QShortcut,
+    QAction,
+    QApplication,
 )
 from PyQt5.QtCore import Qt, QThreadPool
+from PyQt5.QtGui import QKeySequence
 import os
 from .drop_area import DropArea
 from .progress_widget import ProgressWidget
 from src.ui.api_settings_dialog import ApiSettingsDialog
 from core.video_processor import VideoProcessor
-from config import OPENAI_BASE_URL, OPENAI_API_KEY
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, save_config
 
 
 class MainWindow(QMainWindow):
@@ -19,12 +29,33 @@ class MainWindow(QMainWindow):
         self.init_window()
 
     def init_window(self):
-        self.setWindowTitle("videoCaptioner")
-        self.setMinimumSize(800, 600)  # 设置最小窗口大小
-        self.resize(800, 600)  # 设置默认窗口大小
+        # self.setWindowTitle("videoCaptioner")
+        self.setMinimumSize(350, 350)  # 设置最小窗口大小
+        # self.resize(400, 400)  # 设置默认窗口大小
 
         # Set the window icon
         self.setWindowFlags(Qt.Window)
+
+        # Create menu bar with quit action for macOS
+        self.create_menu_actions()
+
+        # Add Command+Q shortcut for macOS
+        self.quit_shortcut = QShortcut(QKeySequence("Ctrl+Q"), self)
+        self.quit_shortcut.activated.connect(self.close)
+
+        # Add Command+Q shortcut specifically for macOS
+        self.quit_shortcut_mac = QShortcut(QKeySequence("Meta+Q"), self)
+        self.quit_shortcut_mac.activated.connect(self.close)
+
+    def create_menu_actions(self):
+        # Create File menu with Quit action
+        file_menu = self.menuBar().addMenu("File")
+
+        # Create Quit action
+        quit_action = QAction("Quit", self)
+        quit_action.setShortcut(QKeySequence("Meta+Q"))
+        quit_action.triggered.connect(QApplication.quit)
+        file_menu.addAction(quit_action)
 
     def closeEvent(self, event):
         if self.central_widget.is_processing:
@@ -32,7 +63,7 @@ class MainWindow(QMainWindow):
                 self,
                 "Are you sure to quit?",
                 QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No
+                QMessageBox.No,
             )
             if reply == QMessageBox.No:
                 event.ignore()
@@ -50,10 +81,7 @@ class SubtitleProcessor(QWidget):
 
     def init_settings(self):
         # Set default display info here
-        self.api_settings = {
-            "base_url": OPENAI_BASE_URL,
-            "api_key": OPENAI_API_KEY
-        }
+        self.api_settings = {"base_url": OPENAI_BASE_URL, "api_key": OPENAI_API_KEY}
         self.thread_pool = QThreadPool()
         self.video_paths = []
         self.cache_dir = os.path.expanduser("~/Desktop/videoCache")
@@ -95,7 +123,8 @@ class SubtitleProcessor(QWidget):
         self.engine_selector = QComboBox()
         self.engine_selector.addItems(["Google Translate", "OpenAI Translate"])
         self.engine_selector.setStyleSheet(
-            "QComboBox { color: white; border: 1px solid #444; }")
+            "QComboBox { color: white; border: 1px solid #444; }"
+        )
         engine_layout.addWidget(self.engine_selector)
         main_layout.addLayout(engine_layout)
 
@@ -122,7 +151,7 @@ class SubtitleProcessor(QWidget):
                 self,
                 "Processing",
                 "Wait for the current task to complete before adding a new file",
-                QMessageBox.Ok
+                QMessageBox.Ok,
             )
 
     def setup_progress_widgets(self):
@@ -140,7 +169,9 @@ class SubtitleProcessor(QWidget):
 
     def process_videos(self):
         if not self.video_paths:
-            QMessageBox.warning(self, "Warning", "Select the file before processing", QMessageBox.Ok)
+            QMessageBox.warning(
+                self, "Warning", "Select the file before processing", QMessageBox.Ok
+            )
             return
 
         # Cleaning progress display area
@@ -154,8 +185,8 @@ class SubtitleProcessor(QWidget):
         self.setup_progress_widgets()
 
         self.start_button.setEnabled(False)
-        self.engine_selector.setEnabled(False)  
-        self.settings_button.setEnabled(False)  
+        self.engine_selector.setEnabled(False)
+        self.settings_button.setEnabled(False)
         self.is_processing = True
         self.drop_area.setEnabled(False)
 
@@ -165,7 +196,7 @@ class SubtitleProcessor(QWidget):
                     video_path=video_path,
                     engine=self.engine_selector.currentText(),
                     api_settings=self.api_settings,
-                    cache_dir=self.cache_dir
+                    cache_dir=self.cache_dir,
                 )
 
                 processor.signals.file_progress.connect(self.update_file_progress)
@@ -187,33 +218,28 @@ class SubtitleProcessor(QWidget):
             self.progress_widgets[file_name].update_status(status)
 
     def handle_error(self, error_message):
-        QMessageBox.critical(
-            self,
-            "Processing error",
-            error_message,
-            QMessageBox.Ok
-        )
+        QMessageBox.critical(self, "Processing error", error_message, QMessageBox.Ok)
 
     def handle_finished(self):
         # Check that all tasks have been completed
         if self.thread_pool.activeThreadCount() == 0:
-            self.reset_ui_state()  
-            
+            self.reset_ui_state()
+
             QMessageBox.information(
-                self,
-                "Processing",
-                "All video processing is complete!",
-                QMessageBox.Ok
+                self, "Processing", "All video processing is complete!", QMessageBox.Ok
             )
 
     def open_settings(self):
         dialog = ApiSettingsDialog(self, self.api_settings)
         if dialog.exec_():
+            # Save settings to config file
+            save_config(self.api_settings["base_url"], self.api_settings["api_key"])
+
             QMessageBox.information(
                 self,
                 "Save Settings",
-                "API Settings have been updated",
-                QMessageBox.Ok
+                "API Settings have been updated and saved",
+                QMessageBox.Ok,
             )
 
     def reset_ui_state(self):
@@ -222,9 +248,9 @@ class SubtitleProcessor(QWidget):
         self.drop_area.reset_state()
         self.video_paths = []
         self.start_button.setEnabled(False)
-        self.engine_selector.setEnabled(True)  
-        self.settings_button.setEnabled(True)  
-        
+        self.engine_selector.setEnabled(True)
+        self.settings_button.setEnabled(True)
+
         # 清理进度显示区域
         while self.progress_layout.count():
             child = self.progress_layout.takeAt(0)

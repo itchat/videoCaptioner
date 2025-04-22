@@ -1,7 +1,4 @@
-from PyQt5.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel,
-    QLineEdit, QPushButton
-)
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton
 from PyQt5.QtCore import Qt
 
 
@@ -14,6 +11,7 @@ class ApiSettingsDialog(QDialog):
     def initUI(self):
         self.setWindowTitle("API Setting")
         self.setFixedSize(420, 280)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
         layout = QVBoxLayout(self)
 
@@ -30,18 +28,22 @@ class ApiSettingsDialog(QDialog):
         # Set your default base_url here
         self.base_url_input.setText(self.api_settings.get("base_url", ""))
         self.base_url_input.setPlaceholderText("Type in Base URL")
-        self.base_url_input.setStyleSheet("QLineEdit { color: white; }")
+        self.base_url_input.setStyleSheet(
+            "QLineEdit { color: white; background-color: #333; }"
+        )
+        self.base_url_input.setFocus()
         form_layout.addWidget(self.base_url_label)
         form_layout.addWidget(self.base_url_input)
 
         self.api_key_label = QLabel("API Key", self)
         self.api_key_input = QLineEdit(self)
-        self.api_key_input.setText(
         # Set your default api_key here
-        self.api_settings.get("api_key", ""))
+        self.api_key_input.setText(self.api_settings.get("api_key", ""))
         self.api_key_input.setEchoMode(QLineEdit.Password)
         self.api_key_input.setPlaceholderText("Type in API Key")
-        self.api_key_input.setStyleSheet("QLineEdit { color: white; }")
+        self.api_key_input.setStyleSheet(
+            "QLineEdit { color: white; background-color: #333; }"
+        )
         form_layout.addWidget(self.api_key_label)
         form_layout.addWidget(self.api_key_input)
 
@@ -53,6 +55,13 @@ class ApiSettingsDialog(QDialog):
         layout.addLayout(form_layout)
 
     def save_settings(self):
-        self.api_settings["base_url"] = self.base_url_input.text()
-        self.api_settings["api_key"] = self.api_key_input.text()
+        # Get the values from the input fields
+        base_url = self.base_url_input.text().strip()
+        api_key = self.api_key_input.text().strip()
+
+        # Update the settings dictionary
+        self.api_settings["base_url"] = base_url
+        self.api_settings["api_key"] = api_key
+
+        # Accept the dialog (close with success)
         self.accept()

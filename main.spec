@@ -49,9 +49,9 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,
+    argv_emulation=True,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
@@ -69,7 +69,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name='videoCaptioner.app',
-    bundle_identifier=None,
+    bundle_identifier='com.videocaptioner.app',
     icon='icons/translate.icns',
     info_plist={
         'NSHighResolutionCapable': 'True',
@@ -87,5 +87,10 @@ app = BUNDLE(
         'LSEnvironment': {
             'PATH': '@executable_path:@executable_path/../Resources:@executable_path/Contents/MacOS:/usr/local/bin:/usr/bin:/bin'
         },
+        'NSAppleEventsUsageDescription': 'This app needs access to keyboard events for shortcuts like Command+Q',
+        'NSHumanReadableCopyright': 'Copyright © 2023',
+        'NSPrincipalClass': 'NSApplication',
+        'NSRequiresAquaSystemAppearance': 'No',
+        'NSSupportsAutomaticGraphicsSwitching': True,
     },
 )
