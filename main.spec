@@ -51,7 +51,7 @@ exe = EXE(
     upx=True,
     console=False,
     disable_windowed_traceback=False,
-    argv_emulation=False,  # 改为False避免弹窗
+    argv_emulation=True,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
@@ -92,7 +92,7 @@ app = BUNDLE(
         'NSPrincipalClass': 'NSApplication',
         'NSRequiresAquaSystemAppearance': 'No',
         'NSSupportsAutomaticGraphicsSwitching': True,
-        'LSUIElement': False,  # 确保不是后台应用
-        'LSBackgroundOnly': False,  # 确保有UI
+        'LSUIElement': False,
+        'LSBackgroundOnly': False,
     },
 )

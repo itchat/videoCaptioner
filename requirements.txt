@@ -5,3 +5,4 @@ requests
 py2app
 deep-translator
 reportlab
+pyinstaller
