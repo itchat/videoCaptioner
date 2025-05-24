@@ -194,8 +194,8 @@ class AudioProcessor(QRunnable):
             
             # Check file size (Whisper large-v3-turbo should be around 1.5GB)
             file_size = os.path.getsize(model_path)
-            min_size = 1.4 * 1024 * 1024 * 1024  # 1.4 GB minimum
-            max_size = 2.0 * 1024 * 1024 * 1024  # 2.0 GB maximum
+            min_size = 1.4 * 1024 * 1024 * 1024   # 1.4 GB minimum  
+            max_size = 2.0 * 1024 * 1024 * 1024   # 2.0 GB maximum
             
             if file_size < min_size:
                 self.logger.error(f"Model file too small: {file_size / (1024**3):.2f} GB")
@@ -209,8 +209,9 @@ class AudioProcessor(QRunnable):
             with open(model_path, 'rb') as f:
                 header = f.read(8)
                 
-                # GGML files typically start with 'ggml' or 'GGML' magic bytes
-                if not (header.startswith(b'ggml') or header.startswith(b'GGML')):
+                # GGML files can start with 'ggml', 'GGML', or 'lmgg' (little-endian)
+                valid_headers = [b'ggml', b'GGML', b'lmgg', b'GMGL']
+                if not any(header.startswith(h) for h in valid_headers):
                     self.logger.error(f"Invalid model file header: {header[:4]}")
                     return False
             

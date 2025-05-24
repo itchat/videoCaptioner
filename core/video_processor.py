@@ -212,8 +212,9 @@ class VideoProcessor(QRunnable):
             with open(model_path, 'rb') as f:
                 header = f.read(8)
                 
-                # GGML files typically start with 'ggml' or 'GGML' magic bytes
-                if not (header.startswith(b'ggml') or header.startswith(b'GGML')):
+                # GGML files can start with 'ggml', 'GGML', or 'lmgg' (little-endian)
+                valid_headers = [b'ggml', b'GGML', b'lmgg', b'GMGL']
+                if not any(header.startswith(h) for h in valid_headers):
                     self.logger.error(f"Invalid model file header: {header[:4]}")
                     return False
             
