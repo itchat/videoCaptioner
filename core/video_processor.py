@@ -1,4 +1,5 @@
 import time
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import requests.adapters
@@ -6,10 +7,11 @@ from PyQt5.QtCore import QRunnable
 import os
 import subprocess
 from datetime import datetime
-from faster_whisper import WhisperModel
+from pywhispercpp.model import Model
 from deep_translator import GoogleTranslator
 from core.worker_signals import WorkerSignals
 from utils.logger import VideoLogger
+from utils.system_optimizer import SystemOptimizer
 import threading
 import re
 import platform
@@ -55,6 +57,181 @@ class VideoProcessor(QRunnable):
         
         # 翻译缓存以提高重复短语的处理效率
         self._translation_cache = {}
+        
+        # 系统优化配置
+        self.optimizer = SystemOptimizer()
+        self.optimized_config = self.optimizer.get_optimized_config()
+        
+        # 记录系统优化信息
+        self.logger.info(f"Video processor optimization - CPU cores: {self.optimized_config['system_info']['cpu_count']}")
+        if self.optimized_config['system_info'].get('is_apple_silicon'):
+            self.logger.info("Apple Silicon detected - using optimized video processing")
+        if self.optimized_config['use_hardware_accel']:
+            self.logger.info("Hardware acceleration available for video processing")
+
+    def get_whisper_model_path(self):
+        """获取 Whisper 模型文件路径，优先使用本地文件，否则下载到用户目录"""
+        # 检测是否在打包环境中运行
+        is_bundled = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+        
+        # 定义模型下载URL
+        model_url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+        
+        # 优先使用用户目录（特别是在打包环境中）
+        user_model_dir = os.path.expanduser("~/.whisper_models")
+        user_model_path = os.path.join(user_model_dir, "ggml-large-v3-turbo.bin")
+        
+        if os.path.exists(user_model_path):
+            self.logger.info(f"Found user model: {user_model_path}")
+            # Validate existing model file
+            if self._validate_model_file(user_model_path):
+                return user_model_path
+            else:
+                self.logger.warning("Existing user model file is corrupted, will re-download")
+                try:
+                    os.remove(user_model_path)
+                    self.logger.info("Removed corrupted user model file")
+                except Exception as e:
+                    self.logger.error(f"Failed to remove corrupted file: {e}")
+        
+        # 在非打包环境下，检查应用内部模型路径
+        if not is_bundled:
+            app_model_dir = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), 
+                "models"
+            )
+            app_model_path = os.path.join(app_model_dir, "ggml-large-v3-turbo.bin")
+            
+            if os.path.exists(app_model_path):
+                self.logger.info(f"Found app model: {app_model_path}")
+                # Validate existing app model file
+                if self._validate_model_file(app_model_path):
+                    return app_model_path
+                else:
+                    self.logger.warning("Existing app model file is corrupted, will download to user directory")
+        
+        # 下载模型到用户目录（适用于所有环境）
+        try:
+            os.makedirs(user_model_dir, exist_ok=True)
+            
+            # 发送下载开始信号
+            self.signals.download_started.emit("Whisper large-v3-turbo")
+            self.signals.download_status.emit("Initializing model download...")
+            
+            # 下载模型到用户目录
+            self.logger.info("Downloading Whisper large-v3-turbo model to user directory...")
+            self.report_status("Downloading Whisper model (first time only)...")
+            
+            import time
+            start_time = time.time()
+            
+            response = requests.get(model_url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            last_time = start_time
+            last_downloaded = 0
+            
+            self.signals.download_status.emit(f"Downloading from {model_url}")
+            
+            with open(user_model_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # 计算并发送下载进度
+                        if total_size > 0:
+                            progress = min(100, int((downloaded / total_size) * 100))
+                            downloaded_mb = downloaded / (1024 * 1024)
+                            total_mb = total_size / (1024 * 1024)
+                            
+                            # 计算下载速度（每秒更新一次）
+                            current_time = time.time()
+                            if current_time - last_time >= 1.0:
+                                speed_bytes_per_sec = (downloaded - last_downloaded) / (current_time - last_time)
+                                speed_mbps = speed_bytes_per_sec / (1024 * 1024)
+                                
+                                # 发送下载进度信号
+                                self.signals.download_progress.emit(progress, downloaded_mb, total_mb, speed_mbps)
+                                
+                                last_time = current_time
+                                last_downloaded = downloaded
+                            
+                            # 更新文件处理进度（限制在20%以内）
+                            file_progress = min(20, progress // 5)
+                            self.report_progress(file_progress)
+            
+            self.logger.info(f"Model downloaded to: {user_model_path}")
+            
+            # Validate downloaded model file
+            if not self._validate_model_file(user_model_path):
+                self.logger.error("Downloaded model file failed validation")
+                # Remove corrupted file
+                try:
+                    os.remove(user_model_path)
+                    self.logger.info("Removed corrupted model file")
+                except Exception as remove_error:
+                    self.logger.error(f"Failed to remove corrupted file: {remove_error}")
+                
+                self.signals.download_error.emit("Downloaded model file is corrupted. Please try again.")
+                raise RuntimeError("Downloaded model file failed validation")
+            
+            self.signals.download_completed.emit()
+            self.signals.download_status.emit("Model download completed successfully!")
+            return user_model_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to download model: {str(e)}")
+            self.signals.download_error.emit(f"Failed to download Whisper model: {str(e)}")
+            raise RuntimeError(f"Failed to download Whisper model: {str(e)}")
+
+    def _validate_model_file(self, model_path):
+        """Validate the integrity of the downloaded Whisper model file"""
+        try:
+            # Check if file exists
+            if not os.path.exists(model_path):
+                self.logger.error(f"Model file does not exist: {model_path}")
+                return False
+            
+            # Check file size (Whisper large-v3-turbo should be around 1.5GB)
+            file_size = os.path.getsize(model_path)
+            min_size = 1.4 * 1024 * 1024 * 1024  # 1.4 GB minimum
+            max_size = 2.0 * 1024 * 1024 * 1024  # 2.0 GB maximum
+            
+            if file_size < min_size:
+                self.logger.error(f"Model file too small: {file_size / (1024**3):.2f} GB")
+                return False
+            
+            if file_size > max_size:
+                self.logger.error(f"Model file too large: {file_size / (1024**3):.2f} GB")
+                return False
+            
+            # Check file header (GGML models start with specific magic bytes)
+            with open(model_path, 'rb') as f:
+                header = f.read(8)
+                
+                # GGML files typically start with 'ggml' or 'GGML' magic bytes
+                if not (header.startswith(b'ggml') or header.startswith(b'GGML')):
+                    self.logger.error(f"Invalid model file header: {header[:4]}")
+                    return False
+            
+            # Additional check: ensure file is not truncated
+            # Try to read from the end of the file
+            with open(model_path, 'rb') as f:
+                f.seek(-1024, 2)  # Seek to last 1KB
+                end_data = f.read(1024)
+                if len(end_data) != 1024:
+                    self.logger.error("Model file appears to be truncated")
+                    return False
+            
+            self.logger.info(f"Model file validation passed: {file_size / (1024**3):.2f} GB")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Model file validation failed: {str(e)}")
+            return False
 
     def report_progress(self, progress):
         self.signals.file_progress.emit(self.base_name, progress)
@@ -165,10 +342,15 @@ class VideoProcessor(QRunnable):
             raise FileNotFoundError(f"Video file not found: {self.video_path}")
             
         try:
-            # 优化FFmpeg参数以减少内存使用
-            result = subprocess.run([
-                ffmpeg_path,
-                "-hwaccel", "videotoolbox",
+            # 使用系统优化的硬件加速参数
+            cmd = [ffmpeg_path]
+            
+            # 添加硬件加速（如果可用）
+            if self.optimized_config['use_hardware_accel']:
+                cmd.extend(["-hwaccel", "videotoolbox"])
+                self.logger.info("Using VideoToolbox hardware acceleration for audio extraction")
+            
+            cmd.extend([
                 "-i", self.video_path,
                 "-q:a", "0",
                 "-map", "a",
@@ -176,7 +358,9 @@ class VideoProcessor(QRunnable):
                 "-ar", "16000",  # 降低采样率，对语音识别足够
                 audio_path,
                 "-y"
-            ], capture_output=True, text=True, check=True, timeout=300)  # 添加超时
+            ])
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=300)
             
             self.logger.info("Audio extraction completed successfully")
             
@@ -195,69 +379,79 @@ class VideoProcessor(QRunnable):
     def generate_subtitles(self, audio_path, srt_path):
         # 使用缓存的 Whisper 模型提高效率
         if self._whisper_model is None:
-            self.logger.info("Loading Whisper large-v3 model with Mac hardware acceleration...")
+            self.logger.info("Loading Whisper large-v3-turbo model with whisper.cpp...")
             self.report_progress(25)  # 更细粒度的进度反馈
             
-            # 检测Mac硬件加速支持
             try:
-                # 尝试使用CoreML加速 (Apple Silicon优化)
-                import platform
-                if platform.processor() == 'arm' or 'arm64' in platform.machine().lower():
-                    self.logger.info("Detected Apple Silicon, enabling CoreML acceleration")
-                    self._whisper_model = WhisperModel(
-                        "large-v3", 
-                        device="auto",  # 自动检测最佳设备
-                        compute_type="auto",  # 自动选择最佳计算精度
-                        cpu_threads=0,  # 使用所有可用CPU线程
-                        num_workers=1   # 单个worker以避免内存问题
+                # 获取模型路径
+                model_path = self.get_whisper_model_path()
+                
+                # 初始化模型并检查硬件加速选项
+                self.logger.info("Initializing Whisper model with hardware acceleration options")
+                
+                try:
+                    # 使用系统优化的线程配置
+                    n_threads = self.optimized_config['whisper_threads']
+                    
+                    self.logger.info(f"Using optimized {n_threads} threads for Whisper processing")
+                    self._whisper_model = Model(
+                        model_path,
+                        n_threads=n_threads,
+                        print_realtime=False,
+                        print_progress=False
                     )
-                else:
-                    # Intel Mac fallback
-                    self.logger.info("Intel Mac detected, using optimized CPU settings")
-                    self._whisper_model = WhisperModel(
-                        "large-v3",
-                        device="cpu",
-                        compute_type="int8",  # 量化以节省内存
-                        cpu_threads=0
-                    )
+                    
+                    self.logger.info("Whisper model initialized with system-optimized threading")
+                    
+                except Exception as model_error:
+                    # 如果带参数初始化失败，回退到默认初始化
+                    self.logger.warning(f"Failed to initialize with optimization parameters: {model_error}")
+                    self.logger.info("Falling back to default initialization")
+                    self._whisper_model = Model(model_path)
+                    
+                self.logger.info("Whisper model loaded successfully")
+                    
             except Exception as e:
-                self.logger.warning(f"Hardware acceleration setup failed, using default: {e}")
-                self._whisper_model = WhisperModel("large-v3")
+                self.logger.error(f"Failed to load Whisper model: {str(e)}")
+                raise RuntimeError(f"Failed to load Whisper model: {str(e)}")
             
         self.report_progress(30)  # 模型加载完成
         
-        # 优化转录参数以提高性能和准确性
-        segments, _ = self._whisper_model.transcribe(
-            audio_path, 
-            language=None,  # 自动检测语言
-            beam_size=5,  # 平衡速度和准确性
-            best_of=5,    # 提高准确性
-            temperature=0.0,  # 确定性输出
-            compression_ratio_threshold=2.4,  # 检测重复
-            log_prob_threshold=-1.0,  # 过滤低置信度
-            no_speech_threshold=0.6,  # 过滤静音段
-            condition_on_previous_text=False,  # 提高并行性
-            word_timestamps=False,  # 不需要词级时间戳，提高速度
-            vad_filter=False,  # 禁用VAD以避免silero模型依赖
-            # vad_parameters=dict(min_silence_duration_ms=500)  # 禁用VAD参数
-        )
-        
-        self.report_progress(35)  # 转录开始
-        with open(srt_path, "w", encoding="utf-8") as f:
-            segment_count = 0
-            for i, segment in enumerate(segments):
-                start = self.format_time(segment.start)
-                end = self.format_time(segment.end)
-                # 清理文本，去除前后空格
-                text = segment.text.strip()
-                if text:  # 只写入非空文本
-                    f.write(f"{i + 1}\n{start} --> {end}\n{text}\n\n")
-                    segment_count += 1
+        # 使用 pywhispercpp 进行转录
+        try:
+            self.logger.info(f"Starting transcription of: {audio_path}")
+            
+            # pywhispercpp 转录 - 直接返回 Segment 对象列表
+            segments = self._whisper_model.transcribe(audio_path)
+            
+            self.report_progress(35)  # 转录开始
+            
+            # 将结果写入 SRT 文件
+            with open(srt_path, "w", encoding="utf-8") as f:
+                segment_count = 0
+                
+                for i, segment in enumerate(segments):
+                    # pywhispercpp 的时间戳是毫秒，需要转换为秒
+                    start_time = segment.t0 / 1000.0  # 转换为秒
+                    end_time = segment.t1 / 1000.0    # 转换为秒
+                    text = segment.text.strip()
                     
-                # 更新进度 (35% -> 40%)
-                if i % 10 == 0:  # 每10个段落更新一次进度
-                    progress = 35 + min(5, (i / max(1, segment_count)) * 5)
-                    self.report_progress(int(progress))
+                    if text:  # 只写入非空文本
+                        start = self.format_time(start_time)
+                        end = self.format_time(end_time)
+                        f.write(f"{i + 1}\n{start} --> {end}\n{text}\n\n")
+                        segment_count += 1
+                        
+                    # 更新进度 (35% -> 40%)
+                    if i % 10 == 0 and len(segments) > 0:
+                        progress = 35 + min(5, (i / len(segments)) * 5)
+                        self.report_progress(int(progress))
+                        
+            self.logger.info(f"Transcription completed, generated {segment_count} segments")
+            
+        except Exception as e:
+            self.logger.error(f"Transcription failed: {str(e)}")
+            raise RuntimeError(f"Transcription failed: {str(e)}")
 
     @staticmethod
     def format_time(seconds):
@@ -636,7 +830,6 @@ class VideoProcessor(QRunnable):
                                 id_str = parts[0].strip()
                                 translation = parts[1]
                                 # 提取数字
-                                import re
                                 match = re.search(r'\d+', id_str)
                                 if match:
                                     entry_id = int(match.group())
@@ -677,8 +870,12 @@ class VideoProcessor(QRunnable):
         translated_entries = []
         completed_count = 0
         
-        # 动态调整线程数，避免过多的并发请求
-        optimal_workers = min(5 if self.engine == "OpenAI Translate" else 10, total_entries)
+        # 使用系统优化的线程配置
+        optimal_workers = (self.optimized_config['openai_workers'] 
+                         if self.engine == "OpenAI Translate" 
+                         else self.optimized_config['google_workers'])
+        
+        self.logger.info(f"Using {optimal_workers} threads for {self.engine} translation")
         
         with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
             # 创建任务

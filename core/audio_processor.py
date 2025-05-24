@@ -1,4 +1,5 @@
 import time
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import requests.adapters
@@ -6,12 +7,14 @@ from PyQt5.QtCore import QRunnable
 import os
 import subprocess
 from datetime import datetime
-from faster_whisper import WhisperModel
+from pywhispercpp.model import Model
 from deep_translator import GoogleTranslator
 from core.worker_signals import WorkerSignals
 from utils.logger import VideoLogger
+from utils.system_optimizer import SystemOptimizer
 import re
 import platform
+import shutil
 
 
 class AudioProcessor(QRunnable):
@@ -50,6 +53,182 @@ class AudioProcessor(QRunnable):
         
         # 翻译缓存以提高重复短语的处理效率
         self._translation_cache = {}
+        
+        # 系统优化配置
+        self.optimizer = SystemOptimizer()
+        self.optimized_config = self.optimizer.get_optimized_config()
+        
+        # 记录系统优化信息
+        self.logger.info(f"System optimization - CPU cores: {self.optimized_config['system_info']['cpu_count']}")
+        if self.optimized_config['system_info'].get('is_apple_silicon'):
+            self.logger.info("Apple Silicon detected - using optimized ML processing")
+        self.logger.info(f"Configured thread limits - Whisper: {self.optimized_config['whisper_threads']}, "
+                        f"OpenAI: {self.optimized_config['openai_workers']}, "
+                        f"Google: {self.optimized_config['google_workers']}")
+
+    def get_whisper_model_path(self):
+        """获取 Whisper 模型文件路径，优先使用本地文件，否则下载到用户目录"""
+        # 检测是否在打包环境中运行
+        is_bundled = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
+        
+        # 定义模型下载URL
+        model_url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+        
+        # 优先使用用户目录（特别是在打包环境中）
+        user_model_dir = os.path.expanduser("~/.whisper_models")
+        user_model_path = os.path.join(user_model_dir, "ggml-large-v3-turbo.bin")
+        
+        if os.path.exists(user_model_path):
+            self.logger.info(f"Found user model: {user_model_path}")
+            # Validate existing model file
+            if self._validate_model_file(user_model_path):
+                return user_model_path
+            else:
+                self.logger.warning("Existing user model file is corrupted, will re-download")
+                try:
+                    os.remove(user_model_path)
+                    self.logger.info("Removed corrupted user model file")
+                except Exception as e:
+                    self.logger.error(f"Failed to remove corrupted file: {e}")
+        
+        # 在非打包环境下，检查应用内部模型路径
+        if not is_bundled:
+            app_model_dir = os.path.join(
+                os.path.dirname(os.path.dirname(__file__)), 
+                "models"
+            )
+            app_model_path = os.path.join(app_model_dir, "ggml-large-v3-turbo.bin")
+            
+            if os.path.exists(app_model_path):
+                self.logger.info(f"Found app model: {app_model_path}")
+                # Validate existing app model file
+                if self._validate_model_file(app_model_path):
+                    return app_model_path
+                else:
+                    self.logger.warning("Existing app model file is corrupted, will download to user directory")
+        
+        # 下载模型到用户目录（适用于所有环境）
+        try:
+            os.makedirs(user_model_dir, exist_ok=True)
+            
+            # 发送下载开始信号
+            self.signals.download_started.emit("Whisper large-v3-turbo")
+            self.signals.download_status.emit("Initializing model download...")
+            
+            # 下载模型到用户目录
+            self.logger.info("Downloading Whisper large-v3-turbo model to user directory...")
+            self.report_status("Downloading Whisper model (first time only)...")
+            
+            import time
+            start_time = time.time()
+            
+            response = requests.get(model_url, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            last_time = start_time
+            last_downloaded = 0
+            
+            self.signals.download_status.emit(f"Downloading from {model_url}")
+            
+            with open(user_model_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        # 计算并发送下载进度
+                        if total_size > 0:
+                            progress = min(100, int((downloaded / total_size) * 100))
+                            downloaded_mb = downloaded / (1024 * 1024)
+                            total_mb = total_size / (1024 * 1024)
+                            
+                            # 计算下载速度（每秒更新一次）
+                            current_time = time.time()
+                            if current_time - last_time >= 1.0:
+                                speed_bytes_per_sec = (downloaded - last_downloaded) / (current_time - last_time)
+                                speed_mbps = speed_bytes_per_sec / (1024 * 1024)
+                                
+                                # 发送下载进度信号
+                                self.signals.download_progress.emit(progress, downloaded_mb, total_mb, speed_mbps)
+                                
+                                last_time = current_time
+                                last_downloaded = downloaded
+                            
+                            # 更新文件处理进度（限制在20%以内）
+                            file_progress = min(20, progress // 5)
+                            self.report_progress(file_progress)
+            
+            self.logger.info(f"Model downloaded to: {user_model_path}")
+            
+            # Validate downloaded model file
+            if not self._validate_model_file(user_model_path):
+                self.logger.error("Downloaded model file failed validation")
+                # Remove corrupted file
+                try:
+                    os.remove(user_model_path)
+                    self.logger.info("Removed corrupted model file")
+                except Exception as remove_error:
+                    self.logger.error(f"Failed to remove corrupted file: {remove_error}")
+                
+                self.signals.download_error.emit("Downloaded model file is corrupted. Please try again.")
+                raise RuntimeError("Downloaded model file failed validation")
+            
+            self.signals.download_completed.emit()
+            self.signals.download_status.emit("Model download completed successfully!")
+            return user_model_path
+            
+        except Exception as e:
+            self.logger.error(f"Failed to download model: {str(e)}")
+            self.signals.download_error.emit(f"Failed to download Whisper model: {str(e)}")
+            raise RuntimeError(f"Failed to download Whisper model: {str(e)}")
+
+    def _validate_model_file(self, model_path):
+        """Validate the integrity of the downloaded Whisper model file"""
+        try:
+            # Check if file exists
+            if not os.path.exists(model_path):
+                self.logger.error(f"Model file does not exist: {model_path}")
+                return False
+            
+            # Check file size (Whisper large-v3-turbo should be around 1.5GB)
+            file_size = os.path.getsize(model_path)
+            min_size = 1.4 * 1024 * 1024 * 1024  # 1.4 GB minimum
+            max_size = 2.0 * 1024 * 1024 * 1024  # 2.0 GB maximum
+            
+            if file_size < min_size:
+                self.logger.error(f"Model file too small: {file_size / (1024**3):.2f} GB")
+                return False
+            
+            if file_size > max_size:
+                self.logger.error(f"Model file too large: {file_size / (1024**3):.2f} GB")
+                return False
+            
+            # Check file header (GGML models start with specific magic bytes)
+            with open(model_path, 'rb') as f:
+                header = f.read(8)
+                
+                # GGML files typically start with 'ggml' or 'GGML' magic bytes
+                if not (header.startswith(b'ggml') or header.startswith(b'GGML')):
+                    self.logger.error(f"Invalid model file header: {header[:4]}")
+                    return False
+            
+            # Additional check: ensure file is not truncated
+            # Try to read from the end of the file
+            with open(model_path, 'rb') as f:
+                f.seek(-1024, 2)  # Seek to last 1KB
+                end_data = f.read(1024)
+                if len(end_data) != 1024:
+                    self.logger.error("Model file appears to be truncated")
+                    return False
+            
+            self.logger.info(f"Model file validation passed: {file_size / (1024**3):.2f} GB")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Model file validation failed: {str(e)}")
+            return False
 
     def report_progress(self, progress):
         self.signals.file_progress.emit(self.base_name, progress)
@@ -74,7 +253,6 @@ class AudioProcessor(QRunnable):
                 self.report_progress(20)
             else:
                 # 直接复制wav文件
-                import shutil
                 shutil.copy2(self.audio_path, cache_paths['audio'])
                 self.report_progress(20)
 
@@ -200,109 +378,102 @@ class AudioProcessor(QRunnable):
     def generate_transcript(self, audio_path, transcript_path):
         # 使用缓存的 Whisper 模型提高效率
         if self._whisper_model is None:
-            self.logger.info("Loading Whisper large-v3 model with Mac hardware acceleration...")
+            self.logger.info("Loading Whisper large-v3-turbo model with whisper.cpp...")
             self.report_progress(25)
             
-            # 检测Mac硬件加速支持
             try:
-                if platform.processor() == 'arm' or 'arm64' in platform.machine().lower():
-                    self.logger.info("Detected Apple Silicon, enabling CoreML acceleration")
-                    self._whisper_model = WhisperModel(
-                        "large-v3", 
-                        device="auto",
-                        compute_type="auto",
-                        cpu_threads=0,
-                        num_workers=1
+                # 获取模型路径
+                model_path = self.get_whisper_model_path()
+                
+                # 初始化模型并检查硬件加速选项
+                self.logger.info("Initializing Whisper model with hardware acceleration options")
+                
+                try:
+                    # 使用系统优化的线程配置
+                    n_threads = self.optimized_config['whisper_threads']
+                    
+                    self.logger.info(f"Using optimized {n_threads} threads for Whisper processing")
+                    self._whisper_model = Model(
+                        model_path,
+                        n_threads=n_threads,
+                        print_realtime=False,
+                        print_progress=False
                     )
-                else:
-                    self.logger.info("Intel Mac detected, using optimized CPU settings")
-                    self._whisper_model = WhisperModel(
-                        "large-v3",
-                        device="cpu",
-                        compute_type="int8",
-                        cpu_threads=0
-                    )
+                    
+                    self.logger.info("Whisper model initialized with system-optimized threading")
+                    
+                except Exception as model_error:
+                    # 如果带参数初始化失败，回退到默认初始化
+                    self.logger.warning(f"Failed to initialize with optimization parameters: {model_error}")
+                    self.logger.info("Falling back to default initialization")
+                    self._whisper_model = Model(model_path)
+                    
+                self.logger.info("Whisper model loaded successfully")
+                    
             except Exception as e:
-                self.logger.warning(f"Hardware acceleration setup failed, using default: {e}")
-                self._whisper_model = WhisperModel("large-v3")
+                self.logger.error(f"Failed to load Whisper model: {str(e)}")
+                raise RuntimeError(f"Failed to load Whisper model: {str(e)}")
             
         self.report_progress(30)
         
-        # 优化转录参数以获得长篇内容
-        segments, _ = self._whisper_model.transcribe(
-            audio_path, 
-            language=None,  # 自动检测语言
-            beam_size=5,
-            best_of=5,
-            temperature=0.0,
-            compression_ratio_threshold=2.4,
-            log_prob_threshold=-1.0,
-            no_speech_threshold=0.6,
-            condition_on_previous_text=True,  # 对于长篇内容保持上下文
-            word_timestamps=False,
-            vad_filter=False,  # 禁用VAD以避免silero模型依赖
-            # vad_parameters=dict(min_silence_duration_ms=1000)  # 禁用VAD参数
-        )
-        
-        self.report_progress(40)
-        
-        # 生成更适合翻译的段落格式 - 按句子结构分段
-        with open(transcript_path, "w", encoding="utf-8") as f:
-            current_paragraph = []
-            sentence_count = 0
-            total_segments = sum(1 for _ in segments)  # 重新计算segments数量
+        # 使用 pywhispercpp 进行转录
+        try:
+            self.logger.info(f"Starting transcription of: {audio_path}")
             
-            # 重新获取segments
-            segments, _ = self._whisper_model.transcribe(
-                audio_path, 
-                language=None,
-                beam_size=5,
-                best_of=5,
-                temperature=0.0,
-                compression_ratio_threshold=2.4,
-                log_prob_threshold=-1.0,
-                no_speech_threshold=0.6,
-                condition_on_previous_text=True,
-                word_timestamps=False,
-                vad_filter=False
-            )
+            # pywhispercpp 转录 - 直接返回 Segment 对象列表
+            segments = self._whisper_model.transcribe(audio_path)
             
-            for i, segment in enumerate(segments):
-                text = segment.text.strip()
-                if text:
-                    current_paragraph.append(text)
-                    
-                    # 检查是否包含句子结束标点
-                    has_sentence_ending = any(punct in text for punct in '.!?。！？')
-                    if has_sentence_ending:
-                        sentence_count += 1
-                    
-                    # 当达到5个完整句子时，或者遇到明显的段落分隔时结束段落
-                    should_end_paragraph = (
-                        sentence_count >= 5 or  # 5个句子一段，便于翻译
-                        len(current_paragraph) >= 15 or  # 防止段落过长
-                        (has_sentence_ending and len(" ".join(current_paragraph)) > 200)  # 超过200字符且有句号
-                    )
-                    
-                    if should_end_paragraph:
-                        paragraph_text = " ".join(current_paragraph)
-                        # 清理文本，确保句子结构完整
-                        paragraph_text = self.clean_paragraph_text(paragraph_text)
-                        f.write(f"{paragraph_text}\n\n")
+            self.report_progress(40)
+            
+            # 生成更适合翻译的段落格式 - 按句子结构分段
+            with open(transcript_path, "w", encoding="utf-8") as f:
+                current_paragraph = []
+                sentence_count = 0
+                total_segments = len(segments)
+                
+                for i, segment in enumerate(segments):
+                    # pywhispercpp 的 Segment 对象有 text 属性
+                    text = segment.text.strip()
+                    if text:
+                        current_paragraph.append(text)
                         
-                        current_paragraph = []
-                        sentence_count = 0
+                        # 检查是否包含句子结束标点
+                        has_sentence_ending = any(punct in text for punct in '.!?。！？')
+                        if has_sentence_ending:
+                            sentence_count += 1
                         
-                    # 更新进度 (40% -> 60%)
-                    if i % 20 == 0:
-                        progress = 40 + min(20, (i / max(1, total_segments)) * 20)
-                        self.report_progress(int(progress))
-            
-            # 处理最后一个段落
-            if current_paragraph:
-                paragraph_text = " ".join(current_paragraph)
-                paragraph_text = self.clean_paragraph_text(paragraph_text)
-                f.write(f"{paragraph_text}\n\n")
+                        # 当达到20个完整句子时，或者遇到明显的段落分隔时结束段落
+                        should_end_paragraph = (
+                            sentence_count >= 20 or  # 20个句子一段，减少PDF间距
+                            len(current_paragraph) >= 50 or  # 防止段落过长
+                            (has_sentence_ending and len(" ".join(current_paragraph)) > 800)  # 超过800字符且有句号
+                        )
+                        
+                        if should_end_paragraph:
+                            paragraph_text = " ".join(current_paragraph)
+                            # 清理文本，确保句子结构完整
+                            paragraph_text = self.clean_paragraph_text(paragraph_text)
+                            f.write(f"{paragraph_text}\n\n")
+                            
+                            current_paragraph = []
+                            sentence_count = 0
+                            
+                        # 更新进度 (40% -> 60%)
+                        if i % 20 == 0:
+                            progress = 40 + min(20, (i / max(1, total_segments)) * 20)
+                            self.report_progress(int(progress))
+                
+                # 处理最后一个段落
+                if current_paragraph:
+                    paragraph_text = " ".join(current_paragraph)
+                    paragraph_text = self.clean_paragraph_text(paragraph_text)
+                    f.write(f"{paragraph_text}\n\n")
+                    
+            self.logger.info("Transcription completed successfully")
+                    
+        except Exception as e:
+            self.logger.error(f"Transcription failed: {str(e)}")
+            raise RuntimeError(f"Transcription failed: {str(e)}")
 
     def clean_paragraph_text(self, text):
         """清理和格式化段落文本，确保翻译友好的句子结构"""
@@ -339,8 +510,12 @@ class AudioProcessor(QRunnable):
             translated_paragraphs = []
             total_paragraphs = len(paragraphs)
             
-            # 使用多线程处理，但限制并发数
-            optimal_workers = min(3 if self.engine == "OpenAI Translate" else 5, total_paragraphs)
+            # 使用多线程处理，但使用系统优化的并发数
+            optimal_workers = (self.optimized_config['openai_workers'] 
+                             if self.engine == "OpenAI Translate" 
+                             else self.optimized_config['google_workers'])
+            
+            self.logger.info(f"Using {optimal_workers} threads for {self.engine} translation")
             
             with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
                 future_to_paragraph = {

@@ -126,7 +126,7 @@ class PodcastPDFGenerator:
             fontName=self.chinese_font,
             textColor=HexColor('#2c3e50'),
             spaceBefore=0.05*inch,
-            spaceAfter=0.2*inch,
+            spaceAfter=0.1*inch,  # 减少段落间距
             leftIndent=0,
             rightIndent=0,
             alignment=TA_JUSTIFY,
@@ -237,7 +237,7 @@ class PodcastPDFGenerator:
                 story.append(Paragraph(chinese_text, self.chinese_style))
             
             # 在每个条目后添加小间距
-            story.append(Spacer(1, 0.2*inch))
+            story.append(Spacer(1, 0.1*inch))  # 减少段落间距
     
     def _clean_text(self, text):
         """清理和格式化文本"""

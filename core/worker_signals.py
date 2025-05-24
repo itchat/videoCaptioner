@@ -10,4 +10,11 @@ class WorkerSignals(QObject):
     status = pyqtSignal(str, str)  # Status signal (filename, status information)
     finished = pyqtSignal()      # Finished signal
     started = pyqtSignal()       # Started signal
+    
+    # 新增模型下载相关信号
+    download_started = pyqtSignal(str)  # 下载开始信号 (model_name)
+    download_progress = pyqtSignal(int, float, float, float)  # 下载进度信号 (percentage, downloaded_mb, total_mb, speed_mbps)
+    download_status = pyqtSignal(str)  # 下载状态信号 (status_message)
+    download_completed = pyqtSignal()  # 下载完成信号
+    download_error = pyqtSignal(str)  # 下载错误信号 (error_message)
 

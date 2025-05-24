@@ -18,6 +18,7 @@ import os
 from .drop_area import DropArea
 from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
+from .download_dialog import DownloadDialog
 from core.video_processor import VideoProcessor
 from core.audio_processor import AudioProcessor
 from config import OPENAI_BASE_URL, OPENAI_API_KEY, save_config
@@ -84,9 +85,20 @@ class SubtitleProcessor(QWidget):
     def init_settings(self):
         # Set default display info here
         self.api_settings = {"base_url": OPENAI_BASE_URL, "api_key": OPENAI_API_KEY}
-        # 设置合理的线程池大小，避免过多并发
+        
+        # 使用系统优化的线程池配置
+        from utils.system_optimizer import SystemOptimizer
+        optimizer = SystemOptimizer()
+        optimized_config = optimizer.get_optimized_config()
+        
         self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(min(4, QThreadPool.globalInstance().maxThreadCount()))
+        optimal_pool_size = optimized_config['main_pool_size']
+        self.thread_pool.setMaxThreadCount(optimal_pool_size)
+        
+        print(f"🔧 Optimized thread pool size: {optimal_pool_size} threads")
+        print(f"💻 System: {optimized_config['system_info']['platform']} - {optimized_config['system_info']['cpu_count']} cores")
+        if optimized_config['system_info'].get('is_apple_silicon'):
+            print("🍎 Apple Silicon optimization enabled")
         
         self.file_paths = []  # 改名为更通用的file_paths
         self.cache_dir = os.path.expanduser("~/Desktop/videoCache")
@@ -95,6 +107,9 @@ class SubtitleProcessor(QWidget):
         self.active_processors = []  # 跟踪活跃的处理器
         self.completed_processors = 0  # 跟踪已完成的处理器数量
         self.total_processors = 0  # 跟踪总处理器数量
+        
+        # 下载对话框管理
+        self.download_dialog = None
 
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
@@ -282,6 +297,13 @@ class SubtitleProcessor(QWidget):
                 processor.signals.status.connect(self.update_file_status)
                 processor.signals.error.connect(self.handle_error)
                 processor.signals.finished.connect(self.handle_finished)
+                
+                # 连接下载相关信号
+                processor.signals.download_started.connect(self.show_download_dialog)
+                processor.signals.download_progress.connect(self.update_download_progress)
+                processor.signals.download_status.connect(self.update_download_status)
+                processor.signals.download_completed.connect(self.download_completed)
+                processor.signals.download_error.connect(self.download_error)
 
                 self.thread_pool.start(processor)
 
@@ -332,6 +354,13 @@ class SubtitleProcessor(QWidget):
                 processor.signals.status.connect(self.update_file_status)
                 processor.signals.error.connect(self.handle_error)
                 processor.signals.finished.connect(self.handle_finished)
+                
+                # 连接下载相关信号
+                processor.signals.download_started.connect(self.show_download_dialog)
+                processor.signals.download_progress.connect(self.update_download_progress)
+                processor.signals.download_status.connect(self.update_download_status)
+                processor.signals.download_completed.connect(self.download_completed)
+                processor.signals.download_error.connect(self.download_error)
 
                 self.thread_pool.start(processor)
 
@@ -484,3 +513,41 @@ class SubtitleProcessor(QWidget):
                 
         except Exception as e:
             print(f"Cleanup error: {e}")  # 使用print避免日志问题
+
+    def show_download_dialog(self, model_name):
+        """显示下载进度对话框"""
+        if self.download_dialog is None:
+            self.download_dialog = DownloadDialog(self)
+        
+        self.download_dialog.show()
+        self.download_dialog.raise_()
+        self.download_dialog.activateWindow()
+        self.download_dialog.add_log(f"Starting download of {model_name} model")
+    
+    def update_download_progress(self, percentage, downloaded_mb, total_mb, speed_mbps):
+        """更新下载进度"""
+        if self.download_dialog:
+            self.download_dialog.update_progress(percentage, downloaded_mb, total_mb, speed_mbps)
+    
+    def update_download_status(self, message):
+        """更新下载状态"""
+        if self.download_dialog:
+            self.download_dialog.update_status(message)
+    
+    def download_completed(self):
+        """下载完成处理"""
+        if self.download_dialog:
+            self.download_dialog.set_completed()
+    
+    def download_error(self, error_message):
+        """下载错误处理"""
+        if self.download_dialog:
+            self.download_dialog.set_error(error_message)
+        else:
+            # 如果对话框不存在，显示错误消息框
+            QMessageBox.critical(
+                self, 
+                "Download Error", 
+                f"Failed to download Whisper model:\n{error_message}", 
+                QMessageBox.Ok
+            )

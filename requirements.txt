@@ -1,6 +1,6 @@
 PyQt5
 qt-material
-faster-whisper
+pywhispercpp
 requests
 py2app
 deep-translator
