@@ -20,8 +20,7 @@ from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
 from .download_dialog import DownloadDialog
 from core.video_processor import VideoProcessor
-from core.audio_processor import AudioProcessor
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, save_config
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, save_config
 
 
 class MainWindow(QMainWindow):
@@ -84,7 +83,11 @@ class SubtitleProcessor(QWidget):
 
     def init_settings(self):
         # Set default display info here
-        self.api_settings = {"base_url": OPENAI_BASE_URL, "api_key": OPENAI_API_KEY}
+        self.api_settings = {
+            "base_url": OPENAI_BASE_URL, 
+            "api_key": OPENAI_API_KEY,
+            "model": OPENAI_MODEL
+        }
         
         # 使用系统优化的线程池配置
         from utils.system_optimizer import SystemOptimizer
@@ -166,16 +169,13 @@ class SubtitleProcessor(QWidget):
 
     def on_files_dropped(self, files):
         if not self.is_processing:
-            # 分离视频和音频文件
+            # 只处理视频文件
             video_files = []
-            audio_files = []
             invalid_files = []
             
             for file_path in files:
                 if self.drop_area.is_video_file(file_path):
                     video_files.append(file_path)
-                elif self.drop_area.is_audio_file(file_path):
-                    audio_files.append(file_path)
                 else:
                     invalid_files.append(file_path)
             
@@ -185,28 +185,12 @@ class SubtitleProcessor(QWidget):
                 QMessageBox.warning(
                     self,
                     "Invalid File Type",
-                    f"The following files are not supported media files and will be ignored:\n" + 
+                    f"The following files are not supported video files and will be ignored:\n" + 
                     "\n".join(invalid_names),
                     QMessageBox.Ok,
                 )
             
-            # 混合文件类型警告
-            if video_files and audio_files:
-                QMessageBox.warning(
-                    self,
-                    "Mixed File Types",
-                    "You have selected both video and audio files. Please process one type at a time.\n"
-                    "Only video files will be processed this time.",
-                    QMessageBox.Ok,
-                )
-                # 优先处理视频文件
-                self.file_paths = video_files
-            elif video_files:
-                self.file_paths = video_files
-            elif audio_files:
-                self.file_paths = audio_files
-            else:
-                self.file_paths = []
+            self.file_paths = video_files
             
             if self.file_paths:
                 self.setup_progress_widgets()
@@ -235,80 +219,16 @@ class SubtitleProcessor(QWidget):
             self.progress_layout.addWidget(progress_widget)
 
     def process_files(self):
-        """统一的文件处理入口，根据文件类型自动判断处理模式"""
+        """处理视频文件"""
         if not self.file_paths:
             QMessageBox.warning(
                 self, "Warning", "Select the file before processing", QMessageBox.Ok
             )
             return
 
-        # 自动检测文件类型
-        has_video = any(self.drop_area.is_video_file(f) for f in self.file_paths)
-        has_audio = any(self.drop_area.is_audio_file(f) for f in self.file_paths)
-        
-        if has_video:
-            # 视频处理模式
-            self.video_paths = self.file_paths
-            self.process_videos()
-        elif has_audio:
-            # 音频处理模式  
-            self.process_audios()
-        else:
-            QMessageBox.warning(
-                self, "Warning", "No valid media files found", QMessageBox.Ok
-            )
-
-    def process_audios(self):
-        """新增的音频处理方法"""
-        # Cleaning progress display area
-        while self.progress_layout.count():
-            child = self.progress_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-        self.progress_widgets = {}
-
-        # Set a new progress display
-        self.setup_progress_widgets()
-
-        self.start_button.setEnabled(False)
-        self.engine_selector.setEnabled(False)
-        self.settings_button.setEnabled(False)
-        self.is_processing = True
-        self.drop_area.setEnabled(False)
-        
-        # 重置计数器
-        self.completed_processors = 0
-        self.total_processors = len(self.file_paths)
-        self.active_processors.clear()
-
-        for audio_path in self.file_paths:
-            try:
-                processor = AudioProcessor(
-                    audio_path=audio_path,
-                    engine=self.engine_selector.currentText(),
-                    api_settings=self.api_settings,
-                    cache_dir=self.cache_dir,
-                )
-
-                # 跟踪处理器
-                self.active_processors.append(processor)
-                
-                processor.signals.file_progress.connect(self.update_file_progress)
-                processor.signals.status.connect(self.update_file_status)
-                processor.signals.error.connect(self.handle_error)
-                processor.signals.finished.connect(self.handle_finished)
-                
-                # 连接下载相关信号
-                processor.signals.download_started.connect(self.show_download_dialog)
-                processor.signals.download_progress.connect(self.update_download_progress)
-                processor.signals.download_status.connect(self.update_download_status)
-                processor.signals.download_completed.connect(self.download_completed)
-                processor.signals.download_error.connect(self.download_error)
-
-                self.thread_pool.start(processor)
-
-            except Exception as e:
-                self.handle_error(f"Error starting processor: {str(e)}")
+        # 只处理视频文件
+        self.video_paths = self.file_paths
+        self.process_videos()
 
     def process_videos(self):
         if not self.video_paths:
@@ -453,7 +373,11 @@ class SubtitleProcessor(QWidget):
         dialog = ApiSettingsDialog(self, self.api_settings)
         if dialog.exec_():
             # Save settings to config file
-            save_config(self.api_settings["base_url"], self.api_settings["api_key"])
+            save_config(
+                self.api_settings["base_url"], 
+                self.api_settings["api_key"],
+                self.api_settings["model"]
+            )
 
             QMessageBox.information(
                 self,
@@ -465,8 +389,8 @@ class SubtitleProcessor(QWidget):
     def reset_ui_state(self):
         self.is_processing = False
         self.drop_area.setEnabled(True)
-        # 重置拖拽区域为通用提示文本
-        self.drop_area.reset_state("Drag and Drop Video or Audio Files")
+        # 重置拖拽区域为视频文件提示文本
+        self.drop_area.reset_state("Drag and Drop Video Files")
         self.file_paths = []  # 重置通用文件路径
         # 为了兼容性，也重置video_paths（如果存在的话）
         if hasattr(self, 'video_paths'):

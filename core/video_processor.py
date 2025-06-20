@@ -16,6 +16,7 @@ import threading
 import re
 import platform
 import json
+from config import OPENAI_MODEL
 
 
 class VideoProcessor(QRunnable):
@@ -585,7 +586,7 @@ class VideoProcessor(QRunnable):
             return self._translation_cache[cache_key]
             
         data = {
-            "model": "gpt-4o-mini",
+            "model": self.api_settings.get("model", OPENAI_MODEL),
             "messages": [
                 {"role": "system", "content": """你是一位资深的专业翻译专家，精通中英文互译，遵循翻译的"信、达、雅"三大原则：
 
@@ -764,7 +765,7 @@ class VideoProcessor(QRunnable):
         batch_text = "\n".join(batch_lines)
         
         data = {
-            "model": "gpt-4o-mini",
+            "model": self.api_settings.get("model", OPENAI_MODEL),
             "messages": [
                 {"role": "system", "content": """你是一位资深的专业翻译专家，精通中英文互译，遵循翻译的"信、达、雅"三大原则。
 

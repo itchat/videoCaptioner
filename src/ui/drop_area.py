@@ -14,7 +14,7 @@ class DropArea(QLabel):
         self.setAcceptDrops(True)
         self.reset_state()
 
-    def reset_state(self, text="Drag and Drop Video or Audio Files"):
+    def reset_state(self, text="Drag and Drop Video Files"):
         """Reset Dragging Region State"""
         self.setAcceptDrops(True)
         self.setText(text)
@@ -54,13 +54,11 @@ class DropArea(QLabel):
 
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
-            # Check if it's a media file (video or audio)
+            # Check if it's a video file
             urls = event.mimeData().urls()
             video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
-            audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma']
-            all_extensions = video_extensions + audio_extensions
             
-            if any(url.toLocalFile().lower().endswith(tuple(all_extensions)) for url in urls):
+            if any(url.toLocalFile().lower().endswith(tuple(video_extensions)) for url in urls):
                 event.acceptProposedAction()
                 self.setStyleSheet("""
                     QLabel {
@@ -80,7 +78,7 @@ class DropArea(QLabel):
         files = []
         for url in event.mimeData().urls():
             file_path = url.toLocalFile()
-            if self.is_media_file(file_path):
+            if self.is_video_file(file_path):
                 files.append(file_path)
 
         if files:
@@ -90,18 +88,6 @@ class DropArea(QLabel):
         event.acceptProposedAction()
 
     @staticmethod
-    def is_media_file(file_path):
-        video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
-        audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma']
-        all_extensions = video_extensions + audio_extensions
-        return any(file_path.lower().endswith(ext) for ext in all_extensions)
-    
-    @staticmethod
     def is_video_file(file_path):
         video_extensions = ['.mp4', '.avi', '.mov', '.mkv', '.flv', '.wmv']
         return any(file_path.lower().endswith(ext) for ext in video_extensions)
-    
-    @staticmethod
-    def is_audio_file(file_path):
-        audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.wma']
-        return any(file_path.lower().endswith(ext) for ext in audio_extensions)

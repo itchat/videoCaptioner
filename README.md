@@ -10,7 +10,7 @@ This is an open-source project designed to make bilingual video content more acc
     - Smart thread pool management (5 threads for OpenAI, 10 for Google)
     - HTTP session reuse for improved performance
 3.	**Intelligent Translation Engine**:  
-    - Choose between Google Translate or OpenAI (gpt-4o-mini) for subtitle translation
+    - Choose between Google Translate or OpenAI (customizable model, defaults to gpt-4.1) for subtitle translation
     - Batch translation optimization for short subtitles
     - Exponential backoff retry strategy with error tolerance
 4.	**Performance Optimizations**:
