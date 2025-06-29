@@ -4,7 +4,7 @@ This is an open-source project designed to make bilingual video content more acc
 
 ### Key Features:
 
-1.	**Advanced Speech Recognition**: Uses Faster Whisper `large-v3` model for high-accuracy English subtitle generation.  
+1.	**Advanced Speech Recognition**: Uses Distil-Whisper `distil-large-v3.5` model for high-accuracy English subtitle generation with 1.5x faster performance.  
 2.	**Optimized Multithreaded Processing**: 
     - Thread-safe concurrent processing for multiple videos
     - Smart thread pool management (5 threads for OpenAI, 10 for Google)

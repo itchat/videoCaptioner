@@ -159,8 +159,8 @@ class SystemOptimizer:
         
         # 检查Whisper模型
         model_paths = [
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "ggml-large-v3-turbo.bin"),
-            os.path.expanduser("~/.whisper_models/ggml-large-v3-turbo.bin")
+            os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "ggml-distil-large-v3.5.bin"),
+            os.path.expanduser("~/.whisper_models/ggml-distil-large-v3.5.bin")
         ]
         
         for model_path in model_paths:

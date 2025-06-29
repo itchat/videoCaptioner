@@ -17,4 +17,7 @@ class WorkerSignals(QObject):
     download_status = pyqtSignal(str)  # 下载状态信号 (status_message)
     download_completed = pyqtSignal()  # 下载完成信号
     download_error = pyqtSignal(str)  # 下载错误信号 (error_message)
+    
+    # 计时器相关信号
+    timer_update = pyqtSignal(str, str)  # 计时器更新信号 (filename, elapsed_time)
 

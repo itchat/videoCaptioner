@@ -8,21 +8,33 @@ project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
 from PyQt5.QtWidgets import QApplication
-from qt_material import apply_stylesheet
 from src.ui.main_window import MainWindow
 
 
 def main():
-    # 设置环境变量来防止额外窗口
-    os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1'
-    os.environ['QT_SCALE_FACTOR'] = '1'
-    os.environ['QT_MAC_WANTS_LAYER'] = '1'
+    # 设置环境变量抑制警告
+    os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning'
     
     # 创建QApplication并设置属性
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)
     
-    apply_stylesheet(app, theme="dark_teal.xml")
+    # 只有在QApplication创建后才能导入需要Qt的模块
+    from utils.theme_manager import theme_manager
+    from utils.log_filter import qt_log_filter
+    
+    # 安装日志过滤器
+    qt_log_filter.install_handler()
+    
+    # 设置 macOS 优化
+    theme_manager.setup_macos_optimizations()
+    
+    # 设置字体（现在可以安全使用QFontDatabase）
+    theme_manager.setup_fonts(app)
+    
+    # 应用主题
+    theme_manager.apply_theme(app, "dark_teal.xml")
+    
     window = MainWindow()
     
     # 确保应用退出时正确清理资源

@@ -163,8 +163,13 @@ class SubtitleProcessor(QWidget):
         self.settings_button = QPushButton("Setting API")
         self.settings_button.clicked.connect(self.open_settings)
 
+        self.clear_button = QPushButton("Clear History")
+        self.clear_button.clicked.connect(self.clear_progress_history)
+        self.clear_button.setEnabled(False)  # 初始状态下禁用
+
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.settings_button)
+        button_layout.addWidget(self.clear_button)
         main_layout.addLayout(button_layout)
 
     def on_files_dropped(self, files):
@@ -217,6 +222,10 @@ class SubtitleProcessor(QWidget):
             progress_widget = ProgressWidget(base_name)
             self.progress_widgets[base_name] = progress_widget
             self.progress_layout.addWidget(progress_widget)
+        
+        # 如果有进度条，启用清除按钮
+        if self.progress_widgets:
+            self.clear_button.setEnabled(True)
 
     def process_files(self):
         """处理视频文件"""
@@ -250,6 +259,7 @@ class SubtitleProcessor(QWidget):
         self.start_button.setEnabled(False)
         self.engine_selector.setEnabled(False)
         self.settings_button.setEnabled(False)
+        self.clear_button.setEnabled(False)  # 处理时禁用清除按钮
         self.is_processing = True
         self.drop_area.setEnabled(False)
         
@@ -274,6 +284,7 @@ class SubtitleProcessor(QWidget):
                 processor.signals.status.connect(self.update_file_status)
                 processor.signals.error.connect(self.handle_error)
                 processor.signals.finished.connect(self.handle_finished)
+                processor.signals.timer_update.connect(self.update_file_timer)
                 
                 # 连接下载相关信号
                 processor.signals.download_started.connect(self.show_download_dialog)
@@ -294,6 +305,10 @@ class SubtitleProcessor(QWidget):
     def update_file_status(self, file_name, status):
         if file_name in self.progress_widgets:
             self.progress_widgets[file_name].update_status(status)
+
+    def update_file_timer(self, file_name, elapsed_time):
+        if file_name in self.progress_widgets:
+            self.progress_widgets[file_name].update_timer(elapsed_time)
 
     def handle_error(self, error_message):
         # 增加已完成的处理器计数（包括错误的情况）
@@ -328,8 +343,8 @@ class SubtitleProcessor(QWidget):
             self.completed_processors = 0
             self.total_processors = 0
             
-            # 重置UI状态
-            self.reset_ui_state()
+            # 重置UI状态，但保留进度条
+            self.reset_ui_state_keep_progress()
 
     def handle_finished(self):
         # 增加已完成的处理器计数
@@ -362,8 +377,8 @@ class SubtitleProcessor(QWidget):
             self.completed_processors = 0
             self.total_processors = 0
             
-            # 重置UI状态
-            self.reset_ui_state()
+            # 重置UI状态，但保留进度条
+            self.reset_ui_state_keep_progress()
 
             QMessageBox.information(
                 self, "Processing", "All processing is complete!", QMessageBox.Ok
@@ -408,6 +423,39 @@ class SubtitleProcessor(QWidget):
             if child.widget():
                 child.widget().deleteLater()
         self.progress_widgets = {}
+
+    def reset_ui_state_keep_progress(self):
+        """重置UI状态但保留进度条"""
+        self.is_processing = False
+        self.drop_area.setEnabled(True)
+        # 重置拖拽区域为视频文件提示文本
+        self.drop_area.reset_state("Drag and Drop Video Files")
+        self.file_paths = []  # 重置通用文件路径
+        # 为了兼容性，也重置video_paths（如果存在的话）
+        if hasattr(self, 'video_paths'):
+            self.video_paths = []
+        self.start_button.setEnabled(False)
+        self.engine_selector.setEnabled(True)
+        self.settings_button.setEnabled(True)
+        
+        # 清理处理器列表
+        self.active_processors.clear()
+        
+        # 不清理进度显示区域，保留进度条
+        # 启用清除历史按钮，让用户可以手动清除
+        if self.progress_widgets:
+            self.clear_button.setEnabled(True)
+        
+    def clear_progress_history(self):
+        """清除历史进度条"""
+        if not self.is_processing:  # 只在没有处理任务时允许清除
+            # 清理进度显示区域
+            while self.progress_layout.count():
+                child = self.progress_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+            self.progress_widgets = {}
+            self.clear_button.setEnabled(False)  # 清除后禁用按钮
         
     def cleanup_on_exit(self):
         """应用退出时的清理工作"""

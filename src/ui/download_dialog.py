@@ -78,7 +78,7 @@ class DownloadDialog(QDialog):
         layout.addWidget(title_label)
         
         # 描述
-        desc_label = QLabel("First-time setup: Downloading Whisper large-v3-turbo model...\nThis may take a few minutes depending on your internet connection.")
+        desc_label = QLabel("First-time setup: Downloading Distil-Whisper distil-large-v3.5 model...\nThis may take a few minutes depending on your internet connection.")
         desc_label.setWordWrap(True)
         desc_label.setAlignment(Qt.AlignCenter)
         desc_label.setStyleSheet("color: #cccccc; font-size: 11px;")

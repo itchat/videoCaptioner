@@ -24,12 +24,21 @@ class ProgressWidget(QWidget):
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
 
+        # 添加计时器和状态的水平布局
+        info_layout = QHBoxLayout()
         self.status_label = QLabel("")
         self.status_label.setStyleSheet("color: #888; font-size: 11px;")
+        
+        self.timer_label = QLabel("00:00")
+        self.timer_label.setStyleSheet("color: #4CAF50; font-size: 11px; font-weight: bold;")
+        
+        info_layout.addWidget(self.status_label)
+        info_layout.addStretch()
+        info_layout.addWidget(self.timer_label)
 
         layout.addLayout(header_layout)
         layout.addWidget(self.progress)
-        layout.addWidget(self.status_label)
+        layout.addLayout(info_layout)
 
         self.setStyleSheet("""
             QLabel { color: #E0E0E0; }
@@ -51,3 +60,6 @@ class ProgressWidget(QWidget):
 
     def update_status(self, status):
         self.status_label.setText(status)
+        
+    def update_timer(self, elapsed_time):
+        self.timer_label.setText(elapsed_time)

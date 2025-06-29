@@ -14,7 +14,6 @@ from utils.logger import VideoLogger
 from utils.system_optimizer import SystemOptimizer
 import threading
 import re
-import platform
 import json
 from config import OPENAI_MODEL
 
@@ -59,6 +58,11 @@ class VideoProcessor(QRunnable):
         # 翻译缓存以提高重复短语的处理效率
         self._translation_cache = {}
         
+        # 计时器相关变量
+        self._start_time = None
+        self._timer_thread = None
+        self._timer_stop_event = threading.Event()
+        
         # 系统优化配置
         self.optimizer = SystemOptimizer()
         self.optimized_config = self.optimizer.get_optimized_config()
@@ -70,17 +74,44 @@ class VideoProcessor(QRunnable):
         if self.optimized_config['use_hardware_accel']:
             self.logger.info("Hardware acceleration available for video processing")
 
+    def _start_timer(self):
+        """启动计时器线程"""
+        self._start_time = time.time()
+        self._timer_stop_event.clear()
+        self._timer_thread = threading.Thread(target=self._timer_worker, daemon=True)
+        self._timer_thread.start()
+        
+    def _stop_timer(self):
+        """停止计时器线程"""
+        if self._timer_thread and self._timer_thread.is_alive():
+            self._timer_stop_event.set()
+            self._timer_thread.join(timeout=1.0)
+    
+    def _timer_worker(self):
+        """计时器工作线程"""
+        while not self._timer_stop_event.is_set():
+            if self._start_time:
+                elapsed = time.time() - self._start_time
+                elapsed_str = self._format_elapsed_time(elapsed)
+                self.signals.timer_update.emit(self.base_name, elapsed_str)
+            time.sleep(1)  # 每秒更新一次
+    
+    def _format_elapsed_time(self, elapsed_seconds):
+        """格式化经过的时间为 MM:SS 格式"""
+        minutes = int(elapsed_seconds // 60)
+        seconds = int(elapsed_seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
+
     def get_whisper_model_path(self):
-        """获取 Whisper 模型文件路径，优先使用本地文件，否则下载到用户目录"""
         # 检测是否在打包环境中运行
         is_bundled = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
         
-        # 定义模型下载URL
-        model_url = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin"
+        # 定义模型下载URL - 使用 Distil-Whisper distil-large-v3.5
+        model_url = "https://huggingface.co/distil-whisper/distil-large-v3.5-ggml/resolve/main/ggml-model.bin"
         
         # 优先使用用户目录（特别是在打包环境中）
         user_model_dir = os.path.expanduser("~/.whisper_models")
-        user_model_path = os.path.join(user_model_dir, "ggml-large-v3-turbo.bin")
+        user_model_path = os.path.join(user_model_dir, "ggml-distil-large-v3.5.bin")
         
         if os.path.exists(user_model_path):
             self.logger.info(f"Found user model: {user_model_path}")
@@ -101,11 +132,11 @@ class VideoProcessor(QRunnable):
                 os.path.dirname(os.path.dirname(__file__)), 
                 "models"
             )
-            app_model_path = os.path.join(app_model_dir, "ggml-large-v3-turbo.bin")
+            app_model_path = os.path.join(app_model_dir, "ggml-distil-large-v3.5.bin")
             
             if os.path.exists(app_model_path):
                 self.logger.info(f"Found app model: {app_model_path}")
-                # Validate existing app model file
+                # Validate existing app model file``
                 if self._validate_model_file(app_model_path):
                     return app_model_path
                 else:
@@ -116,11 +147,11 @@ class VideoProcessor(QRunnable):
             os.makedirs(user_model_dir, exist_ok=True)
             
             # 发送下载开始信号
-            self.signals.download_started.emit("Whisper large-v3-turbo")
+            self.signals.download_started.emit("Distil-Whisper distil-large-v3.5")
             self.signals.download_status.emit("Initializing model download...")
             
             # 下载模型到用户目录
-            self.logger.info("Downloading Whisper large-v3-turbo model to user directory...")
+            self.logger.info("Downloading Distil-Whisper distil-large-v3.5 model to user directory...")
             self.report_status("Downloading Whisper model (first time only)...")
             
             import time
@@ -196,10 +227,10 @@ class VideoProcessor(QRunnable):
                 self.logger.error(f"Model file does not exist: {model_path}")
                 return False
             
-            # Check file size (Whisper large-v3-turbo should be around 1.5GB)
+            # Check file size (Distil-Whisper distil-large-v3.5 should be around 756MB)
             file_size = os.path.getsize(model_path)
-            min_size = 1.4 * 1024 * 1024 * 1024  # 1.4 GB minimum
-            max_size = 2.0 * 1024 * 1024 * 1024  # 2.0 GB maximum
+            min_size = 1.4 * 1024 * 1024 * 1024  # 700 MB minimum
+            max_size = 1.9 * 1024 * 1024 * 1024  # 800 MB maximum
             
             if file_size < min_size:
                 self.logger.error(f"Model file too small: {file_size / (1024**3):.2f} GB")
@@ -247,6 +278,9 @@ class VideoProcessor(QRunnable):
 
     def run(self):
         try:
+            # 启动计时器
+            self._start_timer()
+            
             self.logger.info(f"Starting to process video: {self.base_name}")
             cache_paths = self.get_cache_paths()
 
@@ -291,6 +325,9 @@ class VideoProcessor(QRunnable):
             # Send Completion Signal even if it's failed
             self.signals.finished.emit()
         finally:
+            # 停止计时器
+            self._stop_timer()
+            
             # 确保资源被正确关闭
             try:
                 if hasattr(self, 'session'):
@@ -381,7 +418,7 @@ class VideoProcessor(QRunnable):
     def generate_subtitles(self, audio_path, srt_path):
         # 使用缓存的 Whisper 模型提高效率
         if self._whisper_model is None:
-            self.logger.info("Loading Whisper large-v3-turbo model with whisper.cpp...")
+            self.logger.info("Loading Distil-Whisper distil-large-v3.5 model with whisper.cpp...")
             self.report_progress(25)  # 更细粒度的进度反馈
             
             try:
