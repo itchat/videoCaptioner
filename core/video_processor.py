@@ -470,9 +470,9 @@ class VideoProcessor(QRunnable):
                 segment_count = 0
                 
                 for i, segment in enumerate(segments):
-                    # pywhispercpp 的时间戳是毫秒，需要转换为秒
-                    start_time = segment.t0 / 1000.0  # 转换为秒
-                    end_time = segment.t1 / 1000.0    # 转换为秒
+                    # pywhispercpp 的时间戳是厘秒（centiseconds，10ms），需要转换为秒
+                    start_time = segment.t0 / 100.0  # 厘秒转换为秒
+                    end_time = segment.t1 / 100.0    # 厘秒转换为秒
                     text = segment.text.strip()
                     
                     if text:  # 只写入非空文本
