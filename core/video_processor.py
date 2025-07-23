@@ -650,14 +650,31 @@ class VideoProcessor(QRunnable):
             )
             
             if response.status_code == 200:
-                result = response.json()
-                content = result['choices'][0]['message']['content'].strip()
-                if not content:
-                    raise ValueError("Empty response from OpenAI API")
-                
-                # 缓存结果
-                self._translation_cache[cache_key] = content
-                return content
+                try:
+                    result = response.json()
+                    # 检查响应结构
+                    if 'choices' not in result or not result['choices']:
+                        raise ValueError(f"Invalid API response structure: {result}")
+                    
+                    if 'message' not in result['choices'][0] or 'content' not in result['choices'][0]['message']:
+                        raise ValueError(f"Invalid message structure in API response: {result}")
+                    
+                    content = result['choices'][0]['message']['content'].strip()
+                    if not content:
+                        raise ValueError("Empty response from OpenAI API")
+                    
+                    # 缓存结果
+                    self._translation_cache[cache_key] = content
+                    return content
+                except json.JSONDecodeError as json_err:
+                    # 记录原始响应内容以便调试
+                    response_text = response.text[:500]  # 限制长度避免日志过长
+                    self.logger.error(f"JSON decode error. Response text: {response_text}")
+                    raise requests.exceptions.RequestException(f"Invalid JSON response from OpenAI API: {str(json_err)}")
+                except (KeyError, IndexError, ValueError) as struct_err:
+                    # 响应结构错误
+                    self.logger.error(f"API response structure error: {str(struct_err)}")
+                    raise requests.exceptions.RequestException(f"Invalid API response structure: {str(struct_err)}")
             elif response.status_code == 429:  # 速率限制
                 raise requests.exceptions.RequestException(f"Rate limit exceeded: {response.status_code}")
             else:
@@ -667,8 +684,6 @@ class VideoProcessor(QRunnable):
             raise requests.exceptions.RequestException("OpenAI API request timeout")
         except requests.exceptions.ConnectionError:
             raise requests.exceptions.RequestException("OpenAI API connection error")
-        except json.JSONDecodeError:
-            raise requests.exceptions.RequestException("Invalid JSON response from OpenAI API")
 
     def _translate_with_google(self, entry):
         """Translated using the Deep Translator with better error handling and caching."""
@@ -836,8 +851,25 @@ class VideoProcessor(QRunnable):
             )
             
             if response.status_code == 200:
-                result = response.json()
-                content = result['choices'][0]['message']['content'].strip()
+                try:
+                    result = response.json()
+                    # 检查响应结构
+                    if 'choices' not in result or not result['choices']:
+                        raise ValueError(f"Invalid API response structure: {result}")
+                    
+                    if 'message' not in result['choices'][0] or 'content' not in result['choices'][0]['message']:
+                        raise ValueError(f"Invalid message structure in API response: {result}")
+                    
+                    content = result['choices'][0]['message']['content'].strip()
+                except json.JSONDecodeError as json_err:
+                    # 记录原始响应内容以便调试
+                    response_text = response.text[:500]  # 限制长度避免日志过长
+                    self.logger.error(f"Batch translation JSON decode error. Response text: {response_text}")
+                    raise Exception(f"Invalid JSON response from OpenAI API: {str(json_err)}")
+                except (KeyError, IndexError, ValueError) as struct_err:
+                    # 响应结构错误
+                    self.logger.error(f"Batch translation API response structure error: {str(struct_err)}")
+                    raise Exception(f"Invalid API response structure: {str(struct_err)}")
                 
                 # 解析批量翻译结果 - 改进的解析逻辑
                 translated_entries = []
