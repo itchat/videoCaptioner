@@ -15,7 +15,7 @@ from utils.system_optimizer import SystemOptimizer
 import threading
 import re
 import json
-from config import OPENAI_MODEL
+from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
 
 
 class VideoProcessor(QRunnable):
@@ -302,6 +302,16 @@ class VideoProcessor(QRunnable):
             with open(cache_paths['srt'], "r", encoding="utf-8") as f:
                 lines = f.readlines()
             translated_content = self.translate_subtitles(lines)
+            
+            # Check if bilingual subtitles are empty before proceeding
+            if not translated_content or translated_content.strip() == "":
+                error_msg = "双语字幕为空，跳过视频合成任务"
+                self.logger.warning(error_msg)
+                self.report_status(error_msg)
+                self.report_progress(100)
+                self.signals.finished.emit()
+                return
+            
             with open(cache_paths['bilingual_srt'], "w", encoding="utf-8") as f:
                 f.write(translated_content)
             self.logger.info("Subtitle translation completed")
@@ -625,26 +635,7 @@ class VideoProcessor(QRunnable):
         data = {
             "model": self.api_settings.get("model", OPENAI_MODEL),
             "messages": [
-                {"role": "system", "content": """你是一位资深的专业翻译专家，精通中英文互译，遵循翻译的"信、达、雅"三大原则：
-
-**翻译原则：**
-- 信（忠实）：准确传达原文意思，不遗漏、不添加
-- 达（通顺）：译文流畅自然，符合中文表达习惯  
-- 雅（优美）：语言得体，用词恰当，具有良好的可读性
-
-**翻译策略：**
-1. **专业术语**：采用直译，保持准确性
-2. **习语俚语**：采用意译，转换为对应的中文表达
-3. **文化背景**：结合中文语境，适当调整表达方式
-4. **语言风格**：保持原文的正式/非正式程度
-5. **句式结构**：优先使用中文的自然表达方式
-
-**输出要求：**
-- 只输出中文翻译结果，不包含英文原文
-- 不添加任何解释或多余信息
-- 确保译文自然流畅，适合字幕阅读
-
-请将以下英文字幕翻译成中文："""},
+                {"role": "system", "content": self.api_settings.get("custom_prompt", OPENAI_CUSTOM_PROMPT)},
                 {"role": "user", "content": f"""{entry['text']}"""}
             ],
             "temperature": 0.3,  # 降低温度以获得更一致的翻译
@@ -711,6 +702,15 @@ class VideoProcessor(QRunnable):
         # 检查输入文件
         if not os.path.exists(subtitle_path):
             raise FileNotFoundError(f"Subtitle file not found: {subtitle_path}")
+        
+        # 检查字幕文件是否为空或只包含空白内容
+        try:
+            with open(subtitle_path, 'r', encoding='utf-8') as f:
+                subtitle_content = f.read().strip()
+                if not subtitle_content:
+                    raise ValueError(f"Subtitle file is empty: {subtitle_path}")
+        except Exception as e:
+            raise ValueError(f"Error reading subtitle file {subtitle_path}: {str(e)}")
             
         try:
             # 使用更高效的字幕烧录方法，包含进度更新
@@ -801,23 +801,13 @@ class VideoProcessor(QRunnable):
         
         batch_text = "\n".join(batch_lines)
         
-        data = {
-            "model": self.api_settings.get("model", OPENAI_MODEL),
-            "messages": [
-                {"role": "system", "content": """你是一位资深的专业翻译专家，精通中英文互译，遵循翻译的"信、达、雅"三大原则。
+        # 获取用户自定义的prompt，并为批量翻译做适配
+        base_prompt = self.api_settings.get("custom_prompt", OPENAI_CUSTOM_PROMPT)
+        
+        # 为批量翻译定制prompt，添加格式要求
+        batch_prompt = base_prompt + """
 
-**翻译原则：**
-- 信（忠实）：准确传达原文意思，不遗漏、不添加
-- 达（通顺）：译文流畅自然，符合中文表达习惯  
-- 雅（优美）：语言得体，用词恰当，具有良好的可读性
-
-**翻译策略：**
-1. **专业术语**：采用直译，保持准确性
-2. **习语俚语**：采用意译，转换为对应的中文表达
-3. **文化背景**：结合中文语境，适当调整表达方式
-4. **上下文连贯**：考虑字幕间的逻辑关系，保持表达一致性
-
-**严格格式要求：**
+**批量翻译格式要求：**
 输入格式：ID:数字|英文内容
 输出格式：ID:数字|中文翻译
 
@@ -826,7 +816,12 @@ class VideoProcessor(QRunnable):
 输入：ID:1|Hello world
 输出：ID:1|你好世界
 
-请确保每行输出都严格按照 "ID:数字|中文翻译" 的格式，不要有任何额外的文字。"""},
+请确保每行输出都严格按照 "ID:数字|中文翻译" 的格式，不要有任何额外的文字。"""
+        
+        data = {
+            "model": self.api_settings.get("model", OPENAI_MODEL),
+            "messages": [
+                {"role": "system", "content": batch_prompt},
                 {"role": "user", "content": batch_text}
             ],
             "temperature": 0.2,

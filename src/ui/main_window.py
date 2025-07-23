@@ -20,7 +20,7 @@ from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
 from .download_dialog import DownloadDialog
 from core.video_processor import VideoProcessor
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, save_config
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, save_config
 
 
 class MainWindow(QMainWindow):
@@ -86,7 +86,8 @@ class SubtitleProcessor(QWidget):
         self.api_settings = {
             "base_url": OPENAI_BASE_URL, 
             "api_key": OPENAI_API_KEY,
-            "model": OPENAI_MODEL
+            "model": OPENAI_MODEL,
+            "custom_prompt": OPENAI_CUSTOM_PROMPT
         }
         
         # 使用系统优化的线程池配置
@@ -391,7 +392,8 @@ class SubtitleProcessor(QWidget):
             save_config(
                 self.api_settings["base_url"], 
                 self.api_settings["api_key"],
-                self.api_settings["model"]
+                self.api_settings["model"],
+                self.api_settings["custom_prompt"]
             )
 
             QMessageBox.information(

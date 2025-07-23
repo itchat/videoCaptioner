@@ -1,19 +1,35 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox
+from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QScrollArea
 from PyQt5.QtCore import Qt
+from config import OPENAI_CUSTOM_PROMPT
 
 
 class ApiSettingsDialog(QDialog):
     def __init__(self, parent=None, api_settings=None):
         super().__init__(parent)
-        self.api_settings = api_settings or {"base_url": "", "api_key": "", "model": "gpt-4.1"}
+        self.api_settings = api_settings or {
+            "base_url": "", 
+            "api_key": "", 
+            "model": "gpt-4.1",
+            "custom_prompt": OPENAI_CUSTOM_PROMPT
+        }
         self.initUI()
 
     def initUI(self):
         self.setWindowTitle("API Setting")
-        self.setFixedSize(420, 350)  # 增加高度以容纳模型选择
+        self.setFixedSize(600, 700)  # 增加尺寸以容纳自定义prompt
         self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
 
-        layout = QVBoxLayout(self)
+        # 主布局
+        main_layout = QVBoxLayout(self)
+        
+        # 创建滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        # 滚动内容的容器
+        scroll_widget = QDialog()
+        layout = QVBoxLayout(scroll_widget)
 
         self.title_label = QLabel("API Setting", self)
         self.title_label.setAlignment(Qt.AlignCenter)
@@ -79,23 +95,56 @@ class ApiSettingsDialog(QDialog):
         form_layout.addWidget(self.model_label)
         form_layout.addWidget(self.model_combo)
 
+        # Custom Prompt
+        self.prompt_label = QLabel("Custom Translation Prompt", self)
+        self.prompt_text = QTextEdit(self)
+        self.prompt_text.setPlainText(self.api_settings.get("custom_prompt", ""))
+        self.prompt_text.setStyleSheet(
+            "QTextEdit { color: white; background-color: #333; font-family: monospace; }"
+        )
+        self.prompt_text.setMinimumHeight(200)
+        self.prompt_text.setMaximumHeight(300)
+        form_layout.addWidget(self.prompt_label)
+        form_layout.addWidget(self.prompt_text)
+
+        # Reset to Default Button
+        self.reset_prompt_button = QPushButton("Reset to Default", self)
+        self.reset_prompt_button.clicked.connect(self.reset_prompt_to_default)
+        self.reset_prompt_button.setStyleSheet(
+            "QPushButton { background-color: #555; color: white; padding: 5px; }"
+        )
+        form_layout.addWidget(self.reset_prompt_button)
+
         # Save Button
         self.save_button = QPushButton("Save", self)
         self.save_button.clicked.connect(self.save_settings)
         form_layout.addWidget(self.save_button)
 
         layout.addLayout(form_layout)
+        
+        # 设置滚动区域
+        scroll_area.setWidget(scroll_widget)
+        main_layout.addWidget(scroll_area)
+    
+    def reset_prompt_to_default(self):
+        """重置prompt为默认值"""
+        # 重新导入config以获取最新的默认prompt
+        import config
+        config.load_config()  # 确保获取最新的配置
+        self.prompt_text.setPlainText(config.OPENAI_CUSTOM_PROMPT)
 
     def save_settings(self):
         # Get the values from the input fields
         base_url = self.base_url_input.text().strip()
         api_key = self.api_key_input.text().strip()
         model = self.model_combo.currentText().strip()
+        custom_prompt = self.prompt_text.toPlainText().strip()
 
         # Update the settings dictionary
         self.api_settings["base_url"] = base_url
         self.api_settings["api_key"] = api_key
         self.api_settings["model"] = model
+        self.api_settings["custom_prompt"] = custom_prompt
 
         # Accept the dialog (close with success)
         self.accept()
