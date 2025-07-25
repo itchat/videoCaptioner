@@ -381,6 +381,23 @@ class VideoProcessor(QRunnable):
                 return path
         return None
 
+    def check_has_audio(self):
+        """检查视频文件是否包含音频流"""
+        ffmpeg_path = self.get_ffmpeg_path()
+        if not ffmpeg_path:
+            return False
+            
+        try:
+            cmd = [ffmpeg_path, "-i", self.video_path, "-hide_banner", "-f", "null", "-"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            
+            # 检查stderr输出中是否有音频流信息
+            stderr_output = result.stderr.lower()
+            return "audio:" in stderr_output or "stream #" in stderr_output and ("audio" in stderr_output or "mp3" in stderr_output or "aac" in stderr_output or "wav" in stderr_output)
+        except Exception as e:
+            self.logger.warning(f"Could not check audio streams: {e}")
+            return True  # 默认假设有音频，让extract_audio处理
+
     def extract_audio(self, audio_path):
         ffmpeg_path = self.get_ffmpeg_path()
         if not ffmpeg_path:
@@ -389,6 +406,18 @@ class VideoProcessor(QRunnable):
         # 检查输入文件
         if not os.path.exists(self.video_path):
             raise FileNotFoundError(f"Video file not found: {self.video_path}")
+        
+        # 检查视频是否有音频流
+        if not self.check_has_audio():
+            self.logger.warning("Video file has no audio streams, creating empty audio file")
+            # 创建一个短暂的静音音频文件
+            try:
+                cmd = [ffmpeg_path, "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "0.1", "-q:a", "0", audio_path, "-y"]
+                subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to create silent audio file: {e}")
+                raise RuntimeError("Video has no audio and failed to create silent audio file")
             
         try:
             # 使用系统优化的硬件加速参数
@@ -421,6 +450,16 @@ class VideoProcessor(QRunnable):
         except subprocess.TimeoutExpired:
             raise RuntimeError("Audio extraction timeout: process took too long")
         except subprocess.CalledProcessError as e:
+            # 如果音频提取失败，可能是没有音频流，尝试创建静音文件
+            if "no such file or directory" not in str(e.stderr).lower():
+                try:
+                    self.logger.warning("Audio extraction failed, attempting to create silent audio file")
+                    cmd = [ffmpeg_path, "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-t", "0.1", "-q:a", "0", audio_path, "-y"]
+                    subprocess.run(cmd, capture_output=True, text=True, check=True, timeout=30)
+                    return True
+                except Exception:
+                    pass
+            
             error_msg = f"Error during audio extraction: {e.stderr}"
             self.logger.error(error_msg)
             raise RuntimeError(error_msg)
@@ -470,6 +509,13 @@ class VideoProcessor(QRunnable):
         try:
             self.logger.info(f"Starting transcription of: {audio_path}")
             
+            # 检查音频文件大小，如果太小（如静音文件），直接创建空字幕
+            if os.path.getsize(audio_path) < 1000:  # 小于1KB，可能是静音文件
+                self.logger.info("Audio file is very small, likely silent - creating empty subtitle file")
+                with open(srt_path, "w", encoding="utf-8") as f:
+                    f.write("")  # 创建空字幕文件
+                return
+            
             # pywhispercpp 转录 - 直接返回 Segment 对象列表
             segments = self._whisper_model.transcribe(audio_path)
             
@@ -511,6 +557,11 @@ class VideoProcessor(QRunnable):
 
     def translate_subtitles(self, lines):
         try:
+            # 检查是否为空字幕文件
+            if not lines or all(not line.strip() for line in lines):
+                self.logger.info("Empty subtitle file detected, skipping translation")
+                return ""
+            
             entries = []
             current_id = None
             current_timestamp = ""

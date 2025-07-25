@@ -27,13 +27,13 @@ By providing bilingual subtitles, it ensures that students can follow along more
 
 ### Prerequisites
 - macOS (Apple M series recommended)
-- Python 3.8+
+- Python 3.12+
 - ffmpeg installed via Homebrew: `brew install ffmpeg`
 
 ### Environment Setup
 ```sh
 # Create conda environment
-conda create -n video python=3.11
+conda create -n video python=3.12
 conda activate video
 
 # Install dependencies
@@ -52,36 +52,12 @@ python src/main.py
 sudo rm -rf dist build
 bash icon_maker.sh translate.svg
 sudo pyinstaller main.spec src/main.py
-```
-
-Currently only supports build on Apple M series architecture platform  
-
-## Performance Optimizations (v2.0)
-
-### Recent Improvements
-- **30-50% faster translation** through intelligent threading
-- **Model caching** eliminates repeated Whisper model loading
-- **HTTP session reuse** reduces API call overhead
-- **Thread-safe operations** prevent race conditions
-- **Smart retry logic** with exponential backoff
-- **Batch translation** for improved API efficiency
-
-### Benchmarks
-- 50 concurrent subtitle translations: **0.53s** completion time
-- Thread safety: **100% success rate** with no data loss
-- Error recovery: **Automatic retry** with intelligent backoff
-
-For detailed optimization information, see [OPTIMIZATION_SUMMARY.md](OPTIMIZATION_SUMMARY.md).
+``` 
 
 ## ToDo
 
 - [x] Optimize code structure and threading performance
-- [x] Upgrade to Whisper large-v3 model for better accuracy
-- [x] Implement intelligent retry mechanisms and error handling
-- [x] Add HTTP session reuse and connection pooling
-- [x] Internationalize descriptions and documentation
-- [ ] Add translation result caching system
-- [ ] Support for multiple target languages selection
-- [ ] Cross-platform support (Windows, Linux)
-- [ ] Resume functionality for interrupted processing
-- [ ] Real-time processing progress visualization
+- [x] Test alternative speech recognition models (evaluated [Parakeet TDT 0.6B v2](https://huggingface.co/mlx-community/parakeet-tdt-0.6b-v2) but abandoned due to poor sentence segmentation capabilities)
+- [x] Upgrade UI framework from PyQt5 to PyQt6
+- [x] Fix handling of silent/no-audio videos (added proper detection and graceful processing)
+
