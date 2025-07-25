@@ -1,4 +1,4 @@
-from PyQt5.QtWidgets import (
+from PyQt6.QtWidgets import (
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -7,13 +7,11 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QScrollArea,
     QMessageBox,
-    QShortcut,
-    QAction,
     QApplication,
     QLabel,
 )
-from PyQt5.QtCore import Qt, QThreadPool
-from PyQt5.QtGui import QKeySequence
+from PyQt6.QtCore import Qt, QThreadPool
+from PyQt6.QtGui import QKeySequence, QAction, QShortcut
 import os
 from .drop_area import DropArea
 from .progress_widget import ProgressWidget
@@ -36,7 +34,7 @@ class MainWindow(QMainWindow):
         # self.resize(400, 400)  # 设置默认窗口大小
 
         # Set the window icon
-        self.setWindowFlags(Qt.Window)
+        self.setWindowFlags(Qt.WindowType.Window)
 
         # Create menu bar with quit action for macOS
         self.create_menu_actions()
@@ -64,10 +62,11 @@ class MainWindow(QMainWindow):
             reply = QMessageBox.question(
                 self,
                 "Are you sure to quit?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                "Are you sure you want to quit?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
-            if reply == QMessageBox.No:
+            if reply == QMessageBox.StandardButton.No:
                 event.ignore()
                 return
 
@@ -193,7 +192,7 @@ class SubtitleProcessor(QWidget):
                     "Invalid File Type",
                     f"The following files are not supported video files and will be ignored:\n" + 
                     "\n".join(invalid_names),
-                    QMessageBox.Ok,
+                    QMessageBox.StandardButton.Ok,
                 )
             
             self.file_paths = video_files
@@ -208,7 +207,7 @@ class SubtitleProcessor(QWidget):
                 self,
                 "Processing",
                 "Wait for the current task to complete before adding a new file",
-                QMessageBox.Ok,
+                QMessageBox.StandardButton.Ok,
             )
 
     def setup_progress_widgets(self):
@@ -232,7 +231,7 @@ class SubtitleProcessor(QWidget):
         """处理视频文件"""
         if not self.file_paths:
             QMessageBox.warning(
-                self, "Warning", "Select the file before processing", QMessageBox.Ok
+                self, "Warning", "Select the file before processing", QMessageBox.StandardButton.Ok
             )
             return
 
@@ -243,7 +242,7 @@ class SubtitleProcessor(QWidget):
     def process_videos(self):
         if not self.video_paths:
             QMessageBox.warning(
-                self, "Warning", "Select the file before processing", QMessageBox.Ok
+                self, "Warning", "Select the file before processing", QMessageBox.StandardButton.Ok
             )
             return
 
@@ -315,7 +314,7 @@ class SubtitleProcessor(QWidget):
         # 增加已完成的处理器计数（包括错误的情况）
         self.completed_processors += 1
         
-        QMessageBox.critical(self, "Processing error", error_message, QMessageBox.Ok)
+        QMessageBox.critical(self, "Processing error", error_message, QMessageBox.StandardButton.Ok)
         
         # 检查是否所有任务都已完成（包括错误的）
         if self.completed_processors >= self.total_processors:
@@ -382,12 +381,12 @@ class SubtitleProcessor(QWidget):
             self.reset_ui_state_keep_progress()
 
             QMessageBox.information(
-                self, "Processing", "All processing is complete!", QMessageBox.Ok
+                self, "Processing", "All processing is complete!", QMessageBox.StandardButton.Ok
             )
 
     def open_settings(self):
         dialog = ApiSettingsDialog(self, self.api_settings)
-        if dialog.exec_():
+        if dialog.exec():
             # Save settings to config file
             save_config(
                 self.api_settings["base_url"], 
@@ -400,7 +399,7 @@ class SubtitleProcessor(QWidget):
                 self,
                 "Save Settings",
                 "API Settings have been updated and saved",
-                QMessageBox.Ok,
+                QMessageBox.StandardButton.Ok,
             )
 
     def reset_ui_state(self):
@@ -523,5 +522,5 @@ class SubtitleProcessor(QWidget):
                 self, 
                 "Download Error", 
                 f"Failed to download Whisper model:\n{error_message}", 
-                QMessageBox.Ok
+                QMessageBox.StandardButton.Ok
             )

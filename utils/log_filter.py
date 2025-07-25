@@ -6,7 +6,7 @@
 import sys
 import os
 import logging
-from PyQt5.QtCore import qInstallMessageHandler, QtMsgType
+from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
 
 
 class QtLogFilter:

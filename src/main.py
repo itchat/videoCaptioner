@@ -7,7 +7,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 sys.path.insert(0, project_root)
 
-from PyQt5.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication
 from src.ui.main_window import MainWindow
 
 
@@ -50,7 +50,7 @@ def main():
     app.aboutToQuit.connect(lambda: window.central_widget.cleanup_on_exit() if hasattr(window.central_widget, 'cleanup_on_exit') else None)
     
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

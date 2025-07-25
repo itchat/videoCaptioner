@@ -5,8 +5,8 @@
 
 import os
 import sys
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtGui import QFontDatabase, QFont
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtGui import QFontDatabase, QFont
 
 
 class ThemeManager:
@@ -40,12 +40,8 @@ class ThemeManager:
     def setup_fonts(self, app: QApplication):
         """设置应用程序字体"""
         try:
-            # 现在可以安全地创建 QFontDatabase
-            if self.font_database is None:
-                self.font_database = QFontDatabase()
-            
-            # 获取系统可用字体
-            font_families = self.font_database.families()
+            # 在 PyQt6 中，使用静态方法获取字体信息
+            font_families = QFontDatabase.families()
             
             # macOS 推荐字体顺序
             preferred_fonts = [
@@ -64,7 +60,7 @@ class ThemeManager:
             
             if selected_font:
                 font = QFont(selected_font, 12)
-                font.setStyleHint(QFont.SansSerif)
+                font.setStyleHint(QFont.StyleHint.SansSerif)
                 app.setFont(font)
                 print(f"✅ 设置字体: {selected_font}")
             else:

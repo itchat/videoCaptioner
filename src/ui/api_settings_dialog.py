@@ -1,5 +1,5 @@
-from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QScrollArea
-from PyQt5.QtCore import Qt
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QScrollArea
+from PyQt6.QtCore import Qt
 from config import OPENAI_CUSTOM_PROMPT
 
 
@@ -17,7 +17,7 @@ class ApiSettingsDialog(QDialog):
     def initUI(self):
         self.setWindowTitle("API Setting")
         self.setFixedSize(600, 700)  # 增加尺寸以容纳自定义prompt
-        self.setWindowFlags(self.windowFlags() | Qt.WindowStaysOnTopHint)
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 
         # 主布局
         main_layout = QVBoxLayout(self)
@@ -25,14 +25,14 @@ class ApiSettingsDialog(QDialog):
         # 创建滚动区域
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         # 滚动内容的容器
         scroll_widget = QDialog()
         layout = QVBoxLayout(scroll_widget)
 
         self.title_label = QLabel("API Setting", self)
-        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label)
 
         form_layout = QVBoxLayout()
@@ -55,7 +55,7 @@ class ApiSettingsDialog(QDialog):
         self.api_key_input = QLineEdit(self)
         # Set your default api_key here
         self.api_key_input.setText(self.api_settings.get("api_key", ""))
-        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.api_key_input.setPlaceholderText("Type in API Key")
         self.api_key_input.setStyleSheet(
             "QLineEdit { color: white; background-color: #333; }"

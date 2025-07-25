@@ -3,7 +3,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import requests.adapters
-from PyQt5.QtCore import QRunnable
+from PyQt6.QtCore import QRunnable
 import os
 import subprocess
 from datetime import datetime

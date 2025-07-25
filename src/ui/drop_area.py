@@ -1,6 +1,6 @@
-from PyQt5.QtWidgets import QLabel
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QDragEnterEvent, QDropEvent
+from PyQt6.QtWidgets import QLabel
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 
 
 class DropArea(QLabel):
@@ -18,7 +18,7 @@ class DropArea(QLabel):
         """Reset Dragging Region State"""
         self.setAcceptDrops(True)
         self.setText(text)
-        self.setAlignment(Qt.AlignCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setStyleSheet("""
             QLabel {
                 border: 2px dashed #666;
