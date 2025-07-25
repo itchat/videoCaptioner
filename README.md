@@ -33,7 +33,7 @@ By providing bilingual subtitles, it ensures that students can follow along more
 ### Environment Setup
 ```sh
 # Create conda environment
-conda create -n video python=3.12
+conda create -n video python=3.13
 conda activate video
 
 # Install dependencies
@@ -42,16 +42,13 @@ pip install -r requirements.txt
 
 ### Running the Application
 ```sh
-conda activate video
 python src/main.py
 ```
 
 ## Compilation
 
 ```sh
-sudo rm -rf dist build
-bash icon_maker.sh translate.svg
-sudo pyinstaller main.spec src/main.py
+bash main.sh
 ``` 
 
 ## ToDo
