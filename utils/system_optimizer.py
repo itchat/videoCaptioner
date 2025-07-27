@@ -97,8 +97,8 @@ class SystemOptimizer:
         
         config = {
             'whisper_threads': min(8, cpu_count),  # Whisper处理线程
-            'translation_threads_openai': min(3, max(1, cpu_count // 4)),  # OpenAI翻译线程
-            'translation_threads_google': min(5, max(2, cpu_count // 2)),  # Google翻译线程
+            'translation_threads_openai': min(9, max(3, (cpu_count // 4) * 3)),  # OpenAI翻译线程 - 增加三倍
+            'translation_threads_google': min(15, max(6, (cpu_count // 2) * 3)),  # Google翻译线程 - 增加三倍
             'main_thread_pool': min(4, max(2, cpu_count // 2)),  # 主线程池
             'reasoning': []
         }
@@ -106,18 +106,20 @@ class SystemOptimizer:
         # Apple Silicon优化
         if self.system_info.get('is_apple_silicon', False):
             config['whisper_threads'] = min(10, cpu_count)  # Apple Silicon对AI任务优化更好
-            config['reasoning'].append("🍎 Apple Silicon detected - increased Whisper threads for ML optimization")
+            config['translation_threads_openai'] = min(18, (cpu_count // 3) * 4)  # Apple Silicon优化
+            config['translation_threads_google'] = min(30, (cpu_count // 2) * 4)  # Apple Silicon优化
+            config['reasoning'].append("🍎 Apple Silicon detected - increased Whisper and translation threads for ML optimization")
         
         # 高核心数CPU优化
         if cpu_count >= 8:
-            config['translation_threads_openai'] = min(5, cpu_count // 3)
-            config['translation_threads_google'] = min(8, cpu_count // 2)
-            config['reasoning'].append(f"🚀 High-core CPU ({cpu_count} cores) - increased translation parallelism")
+            config['translation_threads_openai'] = min(15, (cpu_count // 3) * 3)  # 进一步增加高核心CPU的翻译线程
+            config['translation_threads_google'] = min(24, (cpu_count // 2) * 3)  # 进一步增加高核心CPU的翻译线程
+            config['reasoning'].append(f"🚀 High-core CPU ({cpu_count} cores) - increased translation parallelism (3x boost)")
         elif cpu_count <= 4:
-            config['translation_threads_openai'] = 2
-            config['translation_threads_google'] = 3
+            config['translation_threads_openai'] = 6  # 即使在低核心数也保持较高的线程数
+            config['translation_threads_google'] = 9  # 即使在低核心数也保持较高的线程数
             config['main_thread_pool'] = 2
-            config['reasoning'].append(f"⚠️ Limited cores ({cpu_count}) - conservative threading to avoid overload")
+            config['reasoning'].append(f"⚠️ Limited cores ({cpu_count}) - but still using boosted translation threads for better throughput")
         
         # 内存考虑
         memory_gb = self.system_info.get('memory_gb', 8)
