@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QDialog, QVBoxLayout, QLabel, QLineEdit, QPushButton, QComboBox, QTextEdit, QScrollArea
 from PyQt6.QtCore import Qt
-from config import OPENAI_CUSTOM_PROMPT
+from config import OPENAI_CUSTOM_PROMPT, DEFAULT_CUSTOM_PROMPT
 
 
 class ApiSettingsDialog(QDialog):
@@ -68,18 +68,14 @@ class ApiSettingsDialog(QDialog):
         self.model_combo = QComboBox(self)
         # 添加常用的 GPT 模型选项
         models = [
-            "gpt-4.1",
-            "gpt-4o",
-            "gpt-4o-mini", 
-            "gpt-4-turbo",
-            "gpt-4",
-            "gpt-3.5-turbo",
-            "gpt-3.5-turbo-16k"
+            "gpt-4.1-mini",
+            "gpt-4o-mini",
+            "gpt-4.1-nano"
         ]
         self.model_combo.addItems(models)
         self.model_combo.setEditable(True)  # 允许用户输入自定义模型
         # 设置当前模型
-        current_model = self.api_settings.get("model", "gpt-4.1")
+        current_model = self.api_settings.get("model", "gpt-4.1-nano")
         if current_model in models:
             self.model_combo.setCurrentText(current_model)
         else:
@@ -128,10 +124,9 @@ class ApiSettingsDialog(QDialog):
     
     def reset_prompt_to_default(self):
         """重置prompt为默认值"""
-        # 重新导入config以获取最新的默认prompt
-        import config
-        config.load_config()  # 确保获取最新的配置
-        self.prompt_text.setPlainText(config.OPENAI_CUSTOM_PROMPT)
+        # 使用不会被修改的原始默认值
+        from config import DEFAULT_CUSTOM_PROMPT
+        self.prompt_text.setPlainText(DEFAULT_CUSTOM_PROMPT)
 
     def save_settings(self):
         # Get the values from the input fields

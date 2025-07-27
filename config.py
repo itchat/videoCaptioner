@@ -4,8 +4,10 @@ import json
 # Default values
 OPENAI_BASE_URL = ""
 OPENAI_API_KEY = ""
-OPENAI_MODEL = "gpt-4.1"
-OPENAI_CUSTOM_PROMPT = """You are a professional Chinese native translator who needs to fluently translate text into Chinese.
+OPENAI_MODEL = "gpt-4.1-nano"
+
+# 原始默认prompt，不会被load_config修改
+DEFAULT_CUSTOM_PROMPT = """You are a professional Chinese native translator who needs to fluently translate text into Chinese.
 
 ## Translation Rules
 1. Output only the translated content, without explanations or additional content (such as "Here's the translation:" or "Translation as follows:")
@@ -16,6 +18,9 @@ OPENAI_CUSTOM_PROMPT = """You are a professional Chinese native translator who n
 ## OUTPUT FORMAT:
 - **Single paragraph input** → Output translation directly (no separators, no extra text)
 - **Multi-paragraph input** → Use %% as paragraph separator between translations"""
+
+# 当前使用的prompt，会被load_config修改
+OPENAI_CUSTOM_PROMPT = DEFAULT_CUSTOM_PROMPT
 
 # Path to the config file
 CONFIG_DIR = os.path.expanduser("~/Library/Application Support/videoCaptioner")
@@ -37,8 +42,8 @@ def load_config():
                 config = json.load(f)
                 OPENAI_BASE_URL = config.get("base_url", "")
                 OPENAI_API_KEY = config.get("api_key", "")
-                OPENAI_MODEL = config.get("model", "gpt-4.1")
-                OPENAI_CUSTOM_PROMPT = config.get("custom_prompt", OPENAI_CUSTOM_PROMPT)
+                OPENAI_MODEL = config.get("model", "gpt-4.1-nano")
+                OPENAI_CUSTOM_PROMPT = config.get("custom_prompt", DEFAULT_CUSTOM_PROMPT)
         except Exception as e:
             print(f"Error loading config: {e}")
 
@@ -56,8 +61,8 @@ def save_config(base_url, api_key, model=None, custom_prompt=None):
         config = {
             "base_url": base_url, 
             "api_key": api_key,
-            "model": model if model is not None else "gpt-4.1",
-            "custom_prompt": custom_prompt if custom_prompt is not None else OPENAI_CUSTOM_PROMPT
+            "model": model if model is not None else "gpt-4.1-nano",
+            "custom_prompt": custom_prompt if custom_prompt is not None else DEFAULT_CUSTOM_PROMPT
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
@@ -65,8 +70,8 @@ def save_config(base_url, api_key, model=None, custom_prompt=None):
         # Update global variables
         OPENAI_BASE_URL = base_url
         OPENAI_API_KEY = api_key
-        OPENAI_MODEL = model if model is not None else "gpt-4.1"
-        OPENAI_CUSTOM_PROMPT = custom_prompt if custom_prompt is not None else OPENAI_CUSTOM_PROMPT
+        OPENAI_MODEL = model if model is not None else "gpt-4.1-nano"
+        OPENAI_CUSTOM_PROMPT = custom_prompt if custom_prompt is not None else DEFAULT_CUSTOM_PROMPT
 
         return True
     except Exception as e:
