@@ -111,9 +111,9 @@ class SubtitleProcessor(QWidget):
         
         # 保守的线程池设置：优先稳定性而不是并发性能
         if is_apple_silicon:
-            optimal_pool_size = 2  # Apple Silicon 最多2个并发
+            optimal_pool_size = 4  # Apple Silicon 最多2个并发
         else:
-            optimal_pool_size = 1  # 其他平台限制为1个以确保稳定性
+            optimal_pool_size = 2  # 其他平台限制为1个以确保稳定性
         
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(optimal_pool_size)
