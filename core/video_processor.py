@@ -52,8 +52,8 @@ class VideoProcessor(QRunnable):
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
         
-        # 语音识别器 - 使用 Parakeet MLX
-        self._speech_recognizer = None
+        # 语音识别器 - 使用单例模式的 Parakeet MLX
+        # 注意：不在这里初始化，而是在需要时获取单例实例
     
         # 跟踪处理状态以确保正确清理
         self._processing_complete = False
@@ -205,10 +205,8 @@ class VideoProcessor(QRunnable):
                 if hasattr(self, 'session'):
                     self.session.close()
                     
-                # 释放语音识别器内存
-                if hasattr(self, '_speech_recognizer') and self._speech_recognizer is not None:
-                    del self._speech_recognizer
-                    self._speech_recognizer = None
+                # 注意：不再需要释放语音识别器内存，因为使用单例模式
+                # MLX 模型会在应用程序退出时自动清理
                     
                 # 清理日志处理器
                 if hasattr(self, 'logger'):
@@ -363,35 +361,34 @@ class VideoProcessor(QRunnable):
             raise RuntimeError(error_msg)
 
     def generate_subtitles(self, audio_path, srt_path):
-        """使用 Parakeet MLX 生成字幕"""
-        # 初始化语音识别器（如果尚未初始化）
-        if self._speech_recognizer is None:
-            self.logger.info("Initializing Parakeet MLX speech recognizer...")
+        """使用 Parakeet MLX 生成字幕 - 使用单例模式"""
+        # 获取单例语音识别器
+        try:
+            self.logger.info("Getting Parakeet MLX speech recognizer instance...")
             self.report_progress(12)  # 10% + 2% for initialization
             
-            try:
-                # 使用默认的 Parakeet 模型，添加下载回调
-                self._speech_recognizer = SpeechRecognizer(
-                    model_name="mlx-community/parakeet-tdt-0.6b-v2",
-                    fp32=False,  # 使用 bfloat16 精度以节省内存
-                    local_attention=True,  # 使用局部注意力减少内存使用
-                    local_attention_context_size=256,
-                    logger=self.logger,
-                    download_callback=lambda model_name: self.signals.download_started.emit(model_name),
-                    progress_callback=lambda percentage, downloaded_mb, total_mb, speed_mbps: (
-                        self.signals.download_progress.emit(percentage, downloaded_mb, total_mb, speed_mbps),
-                        self.signals.download_completed.emit() if percentage == 100 else None
-                    )[0],  # 只返回第一个结果
-                    status_callback=lambda message: self.signals.download_status.emit(message)
-                )
-                self.logger.info("Parakeet MLX model initialized successfully")
-                
-            except Exception as e:
-                self.logger.error(f"Failed to initialize Parakeet MLX model: {str(e)}")
-                self.signals.download_error.emit(f"Failed to initialize Parakeet MLX model: {str(e)}")
-                raise RuntimeError(f"Failed to initialize Parakeet MLX model: {str(e)}")
+            # 获取单例实例，只有第一次调用时会触发下载回调
+            speech_recognizer = SpeechRecognizer(
+                model_name="mlx-community/parakeet-tdt-0.6b-v2",
+                fp32=False,  # 使用 bfloat16 精度以节省内存
+                local_attention=True,  # 使用局部注意力减少内存使用
+                local_attention_context_size=256,
+                logger=self.logger,
+                download_callback=lambda model_name: self.signals.download_started.emit(model_name),
+                progress_callback=lambda percentage, downloaded_mb, total_mb, speed_mbps: (
+                    self.signals.download_progress.emit(percentage, downloaded_mb, total_mb, speed_mbps),
+                    self.signals.download_completed.emit() if percentage == 100 else None
+                )[0],  # 只返回第一个结果
+                status_callback=lambda message: self.signals.download_status.emit(message)
+            )
+            self.logger.info("Parakeet MLX model instance obtained successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get Parakeet MLX model instance: {str(e)}")
+            self.signals.download_error.emit(f"Failed to get Parakeet MLX model instance: {str(e)}")
+            raise RuntimeError(f"Failed to get Parakeet MLX model instance: {str(e)}")
         
-        self.report_progress(20)  # 模型加载完成，占用10%->20%的进度
+        self.report_progress(20)  # 模型实例获取完成，占用10%->20%的进度
         
         # 使用 Parakeet MLX 进行转录
         try:
@@ -412,8 +409,8 @@ class VideoProcessor(QRunnable):
                     progress = 20 + recognition_progress
                     self.report_progress(min(70, int(progress)))
             
-            # 进行转录
-            result = self._speech_recognizer.transcribe(
+            # 进行转录 - 现在是线程安全的
+            result = speech_recognizer.transcribe(
                 audio_path,
                 chunk_duration=120.0,  # 2分钟分块
                 overlap_duration=15.0,  # 15秒重叠

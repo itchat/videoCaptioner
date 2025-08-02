@@ -3,6 +3,7 @@
 从 check.py 提取核心功能，去除 CLI 相关内容
 """
 import json
+import threading
 from typing import Any, Dict, Optional, Callable
 from mlx.core import bfloat16, float32
 from parakeet_mlx import AlignedResult, AlignedSentence, AlignedToken, from_pretrained
@@ -11,7 +12,23 @@ from utils.logger import VideoLogger
 
 
 class SpeechRecognizer:
-    """语音识别类，封装 Parakeet MLX 模型"""
+    """语音识别类，封装 Parakeet MLX 模型 - 单例模式以避免多线程冲突"""
+    
+    _instance = None
+    _lock = threading.Lock()
+    _model_lock = threading.Lock()  # 模型访问锁
+    
+    def __new__(cls, *args, **kwargs):
+        """单例模式实现"""
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    print("🎙️ Creating new SpeechRecognizer singleton instance")
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        else:
+            print("🎙️ Reusing existing SpeechRecognizer singleton instance")
+        return cls._instance
     
     def __init__(self, 
                  model_name: str = "mlx-community/parakeet-tdt-0.6b-v2",
@@ -23,7 +40,7 @@ class SpeechRecognizer:
                  progress_callback: Optional[Callable[[int, float, float, float], None]] = None,
                  status_callback: Optional[Callable[[str], None]] = None):
         """
-        初始化语音识别器
+        初始化语音识别器（单例模式）
         
         Args:
             model_name: 模型名称
@@ -35,6 +52,10 @@ class SpeechRecognizer:
             progress_callback: 下载进度回调 (percentage, downloaded_mb, total_mb, speed_mbps)
             status_callback: 状态更新回调
         """
+        # 避免重复初始化
+        if self._initialized:
+            return
+            
         self.model_name = model_name
         self.fp32 = fp32
         self.local_attention = local_attention
@@ -44,59 +65,66 @@ class SpeechRecognizer:
         self.progress_callback = progress_callback
         self.status_callback = status_callback
         self._model = None
+        self._initialized = True
         
     def _load_model(self):
-        """加载模型"""
+        """加载模型 - 线程安全版本"""
+        # 双重检查锁定模式
         if self._model is not None:
             return
             
-        if self.logger:
-            self.logger.info(f"Loading model: {self.model_name}")
-            
-        # 检查模型是否需要下载（简单方式：检查缓存目录）
-        needs_download = self._check_if_model_needs_download()
-        
-        # 只有在需要下载时才通知UI显示下载对话框
-        if needs_download and self.download_callback:
-            self.download_callback(self.model_name)
-            
-        if needs_download and self.status_callback:
-            self.status_callback("Initializing model download...")
-        elif self.status_callback:
-            self.status_callback("Loading cached model...")
-            
-        try:
-            # Parakeet MLX 会自动下载模型，但没有进度回调
-            # 我们提供一个简单的状态更新
-            if needs_download and self.status_callback:
-                self.status_callback(f"Downloading {self.model_name}...")
+        with self._model_lock:
+            # 再次检查，防止在等待锁的过程中其他线程已经加载了模型
+            if self._model is not None:
+                return
                 
-            self._model = from_pretrained(
-                self.model_name, 
-                dtype=bfloat16 if not self.fp32 else float32
-            )
+            if self.logger:
+                self.logger.info(f"Loading model: {self.model_name}")
+                
+            # 检查模型是否需要下载（简单方式：检查缓存目录）
+            needs_download = self._check_if_model_needs_download()
             
-            if self.local_attention:
-                self._model.encoder.set_attention_model(
-                    "rel_pos_local_attn",
-                    (self.local_attention_context_size, self.local_attention_context_size),
+            # 只有在需要下载时才通知UI显示下载对话框
+            if needs_download and self.download_callback:
+                self.download_callback(self.model_name)
+                
+            if needs_download and self.status_callback:
+                self.status_callback("Initializing model download...")
+            elif self.status_callback:
+                self.status_callback("Loading cached model...")
+                
+            try:
+                # Parakeet MLX 会自动下载模型，但没有进度回调
+                # 我们提供一个简单的状态更新
+                if needs_download and self.status_callback:
+                    self.status_callback(f"Downloading {self.model_name}...")
+                    
+                self._model = from_pretrained(
+                    self.model_name, 
+                    dtype=bfloat16 if not self.fp32 else float32
                 )
                 
-            if self.logger:
-                self.logger.info("Model loaded successfully")
-                
-            if self.status_callback:
-                self.status_callback("Model loaded successfully!")
+                if self.local_attention:
+                    self._model.encoder.set_attention_model(
+                        "rel_pos_local_attn",
+                        (self.local_attention_context_size, self.local_attention_context_size),
+                    )
                     
-            # 通知下载完成（如果是首次下载）
-            if needs_download and self.progress_callback:
-                self.progress_callback(100, 0, 0, 0)  # 100% 完成
+                if self.logger:
+                    self.logger.info("Model loaded successfully")
                     
-        except Exception as e:
-            error_msg = f"Error loading model {self.model_name}: {e}"
-            if self.logger:
-                self.logger.error(error_msg)
-            raise RuntimeError(error_msg)
+                if self.status_callback:
+                    self.status_callback("Model loaded successfully!")
+                        
+                # 通知下载完成（如果是首次下载）
+                if needs_download and self.progress_callback:
+                    self.progress_callback(100, 0, 0, 0)  # 100% 完成
+                        
+            except Exception as e:
+                error_msg = f"Error loading model {self.model_name}: {e}"
+                if self.logger:
+                    self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
     
     def _check_if_model_needs_download(self):
         """检查模型是否需要下载"""
@@ -126,7 +154,7 @@ class SpeechRecognizer:
                    overlap_duration: float = 15.0,
                    progress_callback: Optional[Callable[[int, int], None]] = None) -> AlignedResult:
         """
-        转录音频文件
+        转录音频文件 - 线程安全版本
         
         Args:
             audio_path: 音频文件路径
@@ -143,13 +171,21 @@ class SpeechRecognizer:
             self.logger.info(f"Starting transcription of: {audio_path}")
             
         try:
-            result = self._model.transcribe(
-                audio_path,
-                dtype=bfloat16 if not self.fp32 else float32,
-                chunk_duration=chunk_duration,
-                overlap_duration=overlap_duration,
-                chunk_callback=progress_callback
-            )
+            # 使用模型锁确保同一时间只有一个转录任务在运行
+            if self.logger:
+                self.logger.info("Acquiring transcription lock...")
+            
+            with self._model_lock:
+                if self.logger:
+                    self.logger.info("Transcription lock acquired, starting transcription...")
+                
+                result = self._model.transcribe(
+                    audio_path,
+                    dtype=bfloat16 if not self.fp32 else float32,
+                    chunk_duration=chunk_duration,
+                    overlap_duration=overlap_duration,
+                    chunk_callback=progress_callback
+                )
             
             if self.logger:
                 self.logger.info(f"Transcription completed for: {audio_path}")
@@ -161,6 +197,20 @@ class SpeechRecognizer:
             if self.logger:
                 self.logger.error(error_msg)
             raise RuntimeError(error_msg)
+    
+    @classmethod
+    def cleanup_singleton(cls):
+        """清理单例实例 - 用于应用程序退出时"""
+        with cls._lock:
+            if cls._instance is not None:
+                try:
+                    if hasattr(cls._instance, '_model') and cls._instance._model is not None:
+                        # MLX 模型会自动清理，我们只需要将引用设为None
+                        cls._instance._model = None
+                except Exception as e:
+                    print(f"Error cleaning up SpeechRecognizer singleton: {e}")
+                finally:
+                    cls._instance = None
 
 
 class SubtitleFormatter:

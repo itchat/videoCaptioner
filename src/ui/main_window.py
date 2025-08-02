@@ -71,6 +71,8 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
+        # 清理资源
+        self.central_widget.cleanup_on_exit()
         self.central_widget.reset_ui_state()
         event.accept()
 
@@ -92,18 +94,12 @@ class SubtitleProcessor(QWidget):
             "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH
         }
         
-        # 简化的线程池配置
+        # 优化的线程池配置以避免语音识别并发问题
         import multiprocessing
         cpu_count = multiprocessing.cpu_count()
-        optimal_pool_size = min(4, max(2, cpu_count // 2))
         
-        self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(optimal_pool_size)
-        
-        print(f"🔧 Thread pool size: {optimal_pool_size} threads")
-        print(f"💻 System: {platform.system()} - {cpu_count} cores")
-        
-        # 检测Apple Silicon
+        # 对于语音识别任务，限制并发数以避免 MLX 模型冲突
+        # Apple Silicon 设备建议最多2个并发，其他设备建议1个
         is_apple_silicon = False
         if platform.system() == 'Darwin':
             try:
@@ -113,8 +109,20 @@ class SubtitleProcessor(QWidget):
             except Exception:
                 pass
         
+        # 保守的线程池设置：优先稳定性而不是并发性能
         if is_apple_silicon:
-            print("🍎 Apple Silicon detected")
+            optimal_pool_size = 2  # Apple Silicon 最多2个并发
+        else:
+            optimal_pool_size = 1  # 其他平台限制为1个以确保稳定性
+        
+        self.thread_pool = QThreadPool()
+        self.thread_pool.setMaxThreadCount(optimal_pool_size)
+        
+        print(f"🔧 Thread pool size: {optimal_pool_size} threads (optimized for speech recognition)")
+        print(f"💻 System: {platform.system()} - {cpu_count} cores")
+        
+        if is_apple_silicon:
+            print("🍎 Apple Silicon detected - using optimized concurrency")
         
         self.file_paths = []  # 改名为更通用的file_paths
         self.cache_dir = os.path.expanduser("~/Desktop/videoCache")
@@ -345,12 +353,6 @@ class SubtitleProcessor(QWidget):
                         processor.logger.cleanup()
                     except:
                         pass
-                if hasattr(processor, '_speech_recognizer') and processor._speech_recognizer is not None:
-                    try:
-                        del processor._speech_recognizer
-                        processor._speech_recognizer = None
-                    except:
-                        pass
                         
             self.active_processors.clear()
             # 重置计数器
@@ -377,12 +379,6 @@ class SubtitleProcessor(QWidget):
                 if hasattr(processor, 'logger'):
                     try:
                         processor.logger.cleanup()
-                    except:
-                        pass
-                if hasattr(processor, '_speech_recognizer') and processor._speech_recognizer is not None:
-                    try:
-                        del processor._speech_recognizer
-                        processor._speech_recognizer = None
                     except:
                         pass
                         
@@ -489,16 +485,17 @@ class SubtitleProcessor(QWidget):
                         processor.logger.cleanup()
                     except:
                         pass
-                if hasattr(processor, '_speech_recognizer') and processor._speech_recognizer is not None:
-                    try:
-                        del processor._speech_recognizer
-                        processor._speech_recognizer = None
-                    except:
-                        pass
             
             # 等待线程池完成
             if hasattr(self, 'thread_pool'):
                 self.thread_pool.waitForDone(5000)  # 最多等待5秒
+            
+            # 清理单例模式的语音识别器
+            try:
+                from core.speech_recognizer import SpeechRecognizer
+                SpeechRecognizer.cleanup_singleton()
+            except Exception as e:
+                print(f"Error cleaning up SpeechRecognizer: {e}")
                 
         except Exception as e:
             print(f"Cleanup error: {e}")  # 使用print避免日志问题
