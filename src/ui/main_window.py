@@ -8,17 +8,18 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QMessageBox,
     QApplication,
-    QLabel,
 )
 from PyQt6.QtCore import Qt, QThreadPool
 from PyQt6.QtGui import QKeySequence, QAction, QShortcut
 import os
+import platform
+import subprocess
 from .drop_area import DropArea
 from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
 from .download_dialog import DownloadDialog
 from core.video_processor import VideoProcessor
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, save_config
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, save_config
 
 
 class MainWindow(QMainWindow):
@@ -86,22 +87,34 @@ class SubtitleProcessor(QWidget):
             "base_url": OPENAI_BASE_URL, 
             "api_key": OPENAI_API_KEY,
             "model": OPENAI_MODEL,
-            "custom_prompt": OPENAI_CUSTOM_PROMPT
+            "custom_prompt": OPENAI_CUSTOM_PROMPT,
+            "max_chars_per_batch": OPENAI_MAX_CHARS_PER_BATCH,
+            "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH
         }
         
-        # 使用系统优化的线程池配置
-        from utils.system_optimizer import SystemOptimizer
-        optimizer = SystemOptimizer()
-        optimized_config = optimizer.get_optimized_config()
+        # 简化的线程池配置
+        import multiprocessing
+        cpu_count = multiprocessing.cpu_count()
+        optimal_pool_size = min(4, max(2, cpu_count // 2))
         
         self.thread_pool = QThreadPool()
-        optimal_pool_size = optimized_config['main_pool_size']
         self.thread_pool.setMaxThreadCount(optimal_pool_size)
         
-        print(f"🔧 Optimized thread pool size: {optimal_pool_size} threads")
-        print(f"💻 System: {optimized_config['system_info']['platform']} - {optimized_config['system_info']['cpu_count']} cores")
-        if optimized_config['system_info'].get('is_apple_silicon'):
-            print("🍎 Apple Silicon optimization enabled")
+        print(f"🔧 Thread pool size: {optimal_pool_size} threads")
+        print(f"💻 System: {platform.system()} - {cpu_count} cores")
+        
+        # 检测Apple Silicon
+        is_apple_silicon = False
+        if platform.system() == 'Darwin':
+            try:
+                result = subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], 
+                                      capture_output=True, text=True, timeout=5)
+                is_apple_silicon = result.returncode == 0 and result.stdout.strip() == '1'
+            except Exception:
+                pass
+        
+        if is_apple_silicon:
+            print("🍎 Apple Silicon detected")
         
         self.file_paths = []  # 改名为更通用的file_paths
         self.cache_dir = os.path.expanduser("~/Desktop/videoCache")
@@ -393,7 +406,9 @@ class SubtitleProcessor(QWidget):
                 self.api_settings["base_url"], 
                 self.api_settings["api_key"],
                 self.api_settings["model"],
-                self.api_settings["custom_prompt"]
+                self.api_settings["custom_prompt"],
+                self.api_settings["max_chars_per_batch"],
+                self.api_settings["max_entries_per_batch"]
             )
 
             QMessageBox.information(

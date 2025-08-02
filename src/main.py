@@ -15,6 +15,21 @@ def main():
     # 设置环境变量抑制警告
     os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning'
     
+    # 修复 macOS .app 环境中 ffmpeg PATH 问题
+    if hasattr(sys, 'frozen') and sys.frozen:
+        # 在打包环境中，将内置 ffmpeg 添加到 PATH
+        current_path = os.environ.get('PATH', '')
+        
+        # 检查应用包的 Contents/Frameworks 目录（ffmpeg 的实际位置）
+        if sys.executable.endswith('.app/Contents/MacOS/main'):
+            app_frameworks = os.path.join(os.path.dirname(sys.executable), '..', 'Frameworks')
+            app_frameworks = os.path.abspath(app_frameworks)
+            
+            if os.path.exists(os.path.join(app_frameworks, 'ffmpeg')):
+                if app_frameworks not in current_path:
+                    current_path = f"{app_frameworks}:{current_path}"
+                    os.environ['PATH'] = current_path
+    
     # 创建QApplication并设置属性
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(True)

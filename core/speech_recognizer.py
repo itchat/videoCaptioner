@@ -3,9 +3,7 @@
 从 check.py 提取核心功能，去除 CLI 相关内容
 """
 import json
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Callable
-
+from typing import Any, Dict, Optional, Callable
 from mlx.core import bfloat16, float32
 from parakeet_mlx import AlignedResult, AlignedSentence, AlignedToken, from_pretrained
 

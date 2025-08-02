@@ -2,7 +2,6 @@
 
 import os
 import sys
-from PyInstaller.utils.hooks import collect_dynamic_libs
 
 def get_ffmpeg_path():
     possible_paths = [
@@ -20,15 +19,25 @@ ffmpeg_path = get_ffmpeg_path()
 if not ffmpeg_path:
     raise FileNotFoundError("Could not find ffmpeg. Please install it first.")
 
+# Get user home directory and construct conda environment path
+user_home = os.path.expanduser("~")
+conda_env_path = os.path.join(user_home, "anaconda3/envs/video")
+
+print(f"Bundling ffmpeg from: {ffmpeg_path}")
+print(f"Using conda environment: {conda_env_path}")
+
 # First create the Analysis object
 a = Analysis(
     ['src/main.py'],
     pathex=[],
     binaries=[
-        (ffmpeg_path, 'Contents/MacOS'),
+        (ffmpeg_path, 'Frameworks'),  # 将 ffmpeg 放在 Contents/Frameworks 目录
+        (f'{conda_env_path}/lib/python3.13/site-packages/mlx/lib/mlx.metallib', 'mlx'),
     ],
-    datas=[],
-    hiddenimports=[],
+    datas=[
+        (f'{conda_env_path}/lib/python3.13/site-packages/mlx', './mlx'),
+    ],
+    hiddenimports=["mlx", "mlx._reprlib_fix","mlx._os_warning"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -85,7 +94,7 @@ app = BUNDLE(
             }
         ],
         'LSEnvironment': {
-            'PATH': '@executable_path:@executable_path/../Resources:@executable_path/Contents/MacOS:/usr/local/bin:/usr/bin:/bin'
+            'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:@executable_path:@executable_path/../Resources:@executable_path/Contents/MacOS'
         },
         'NSAppleEventsUsageDescription': 'This app needs access to keyboard events for shortcuts like Command+Q',
         'NSHumanReadableCopyright': 'Copyright © 2023',

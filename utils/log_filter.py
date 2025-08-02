@@ -3,7 +3,6 @@
 用于过滤和管理应用程序的日志输出
 """
 
-import sys
 import os
 import logging
 from PyQt6.QtCore import qInstallMessageHandler, QtMsgType

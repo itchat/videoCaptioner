@@ -1,21 +1,19 @@
 import time
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 import requests.adapters
 from PyQt6.QtCore import QRunnable
 import os
 import subprocess
+import sys
 from datetime import datetime
 from deep_translator import GoogleTranslator
 from core.worker_signals import WorkerSignals
 from core.speech_recognizer import SpeechRecognizer, SubtitleFormatter
 from utils.logger import VideoLogger
-from utils.system_optimizer import SystemOptimizer
 import threading
-import re
 import json
-from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
+import platform
+from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH
 
 
 class ContentFilteredException(Exception):
@@ -60,35 +58,23 @@ class VideoProcessor(QRunnable):
         # 跟踪处理状态以确保正确清理
         self._processing_complete = False
         
-        # 翻译缓存以提高重复短语的处理效率
-        self._translation_cache = {}
-        
-        # 添加持久化缓存支持
-        self._cache_file = os.path.join(cache_dir, "translation_cache.json")
-        self._load_translation_cache()
-        
-        # 添加批量优化参数
-        self._batch_optimization_enabled = True
-        
-        # 添加API请求优化
-        self._request_session_pool = {}
-        
         # 计时器相关变量
         self._start_time = None
         self._timer_thread = None
         self._timer_stop_event = threading.Event()
         
-        # 系统优化配置
-        self.optimizer = SystemOptimizer()
-        self.optimized_config = self.optimizer.get_optimized_config()
+        # 简化的系统检测
+        self.use_hardware_accel = self._check_hardware_acceleration()
+        self.is_apple_silicon = self._is_apple_silicon()
         
-        # 记录系统优化信息
-        self.logger.info(f"Video processor optimization - CPU cores: {self.optimized_config['system_info']['cpu_count']}")
-        if self.optimized_config['system_info'].get('is_apple_silicon'):
+        # 记录系统信息
+        self.logger.info(f"Video processor - Platform: {platform.system()}")
+        if self.is_apple_silicon:
             self.logger.info("Apple Silicon detected - using optimized video processing")
-        if self.optimized_config['use_hardware_accel']:
+        
+        if self.use_hardware_accel:
             self.logger.info("Hardware acceleration available for video processing")
-
+    
     def _start_timer(self):
         """启动计时器线程"""
         self._start_time = time.time()
@@ -117,6 +103,31 @@ class VideoProcessor(QRunnable):
         seconds = int(elapsed_seconds % 60)
         return f"{minutes:02d}:{seconds:02d}"
 
+    def _is_apple_silicon(self) -> bool:
+        """检测是否是Apple Silicon"""
+        if platform.system() != 'Darwin':
+            return False
+        try:
+            result = subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], 
+                                  capture_output=True, text=True, timeout=5)
+            return result.returncode == 0 and result.stdout.strip() == '1'
+        except Exception:
+            return False
+
+    def _check_hardware_acceleration(self) -> bool:
+        """检查VideoToolbox硬件加速支持"""
+        if platform.system() != 'Darwin':
+            return False
+        try:
+            ffmpeg_path = self.get_ffmpeg_path()
+            if not ffmpeg_path:
+                return False
+            result = subprocess.run([ffmpeg_path, '-version'], 
+                                  capture_output=True, text=True, timeout=5)
+            return result.returncode == 0 and 'videotoolbox' in result.stdout.lower()
+        except Exception:
+            return False
+
     def report_progress(self, progress):
         self.signals.file_progress.emit(self.base_name, progress)
         if self.progress_callback:
@@ -135,20 +146,20 @@ class VideoProcessor(QRunnable):
             self.logger.info(f"Starting to process video: {self.base_name}")
             cache_paths = self.get_cache_paths()
 
-            # Produce Audio (0-20%)
+            # Produce Audio (0-10%)
             self.report_status("Extracting audio...")
             self.report_progress(0)
             self.extract_audio(cache_paths['audio'])
             self.logger.info("Audio extraction completed")
-            self.report_progress(20)
+            self.report_progress(10)
 
-            # Generate Subtitle (20-40%)
+            # Generate Subtitle (10-70%)
             self.report_status("Recognizing speech...")
             self.generate_subtitles(cache_paths['audio'], cache_paths['srt'])
             self.logger.info("Subtitle generation complete")
-            self.report_progress(40)
+            self.report_progress(70)
 
-            # Translate Subtitle (40-70%)
+            # Translate Subtitle (70-80%)
             self.report_status("Translating subtitles...")
             with open(cache_paths['srt'], "r", encoding="utf-8") as f:
                 lines = f.readlines()
@@ -166,9 +177,9 @@ class VideoProcessor(QRunnable):
             with open(cache_paths['bilingual_srt'], "w", encoding="utf-8") as f:
                 f.write(translated_content)
             self.logger.info("Subtitle translation completed")
-            self.report_progress(70)
+            self.report_progress(80)
 
-            # Composite Video (70-100%)
+            # Composite Video (80-100%)
             self.report_status("Synthesizing video...")
             self.burn_subtitles(cache_paths['bilingual_srt'], cache_paths['output_video'])
             self.logger.info("Video synthesis completed")
@@ -191,9 +202,6 @@ class VideoProcessor(QRunnable):
             
             # 确保资源被正确关闭
             try:
-                # 保存翻译缓存
-                self._save_translation_cache()
-                
                 if hasattr(self, 'session'):
                     self.session.close()
                     
@@ -223,16 +231,45 @@ class VideoProcessor(QRunnable):
 
     @staticmethod
     def get_ffmpeg_path():
-        # Potential FFmpeg Paths
+        """
+        获取 ffmpeg 路径
+        - 打包环境：使用内置的 ffmpeg
+        - 开发环境：使用系统安装的 ffmpeg
+        """
+        # 检测是否在 PyInstaller 打包环境中
+        if getattr(sys, 'frozen', False):
+            if platform.system() == 'Darwin':  # macOS
+                # 在 macOS .app 包中，检查 Contents/Frameworks 目录
+                if '.app/Contents/MacOS' in sys.executable:
+                    app_frameworks = os.path.join(os.path.dirname(sys.executable), '..', 'Frameworks')
+                    ffmpeg_path = os.path.join(os.path.abspath(app_frameworks), 'ffmpeg')
+                    if os.path.exists(ffmpeg_path):
+                        return ffmpeg_path
+                
+                # 也检查可执行文件同目录
+                bundle_dir = os.path.dirname(sys.executable)
+                ffmpeg_path = os.path.join(bundle_dir, 'ffmpeg')
+                if os.path.exists(ffmpeg_path):
+                    return ffmpeg_path
+            else:
+                # 其他平台的 PyInstaller 环境
+                bundle_dir = os.path.dirname(sys.executable)
+                ffmpeg_path = os.path.join(bundle_dir, 'ffmpeg')
+                if os.path.exists(ffmpeg_path):
+                    return ffmpeg_path
+        
+        # 开发环境 - 使用系统安装的 ffmpeg
         possible_paths = [
             '/opt/homebrew/bin/ffmpeg',  # MacOS Homebrew
-            '/usr/local/bin/ffmpeg',  # Linux/MacOS Path
-            '/usr/bin/ffmpeg',  # Others
+            '/usr/local/bin/ffmpeg',     # Linux/MacOS Path
+            '/usr/bin/ffmpeg',           # Others
         ]
-
+        
         for path in possible_paths:
             if os.path.exists(path):
                 return path
+                
+        # 如果都找不到，返回 None
         return None
 
     def check_has_audio(self):
@@ -255,7 +292,14 @@ class VideoProcessor(QRunnable):
     def extract_audio(self, audio_path):
         ffmpeg_path = self.get_ffmpeg_path()
         if not ffmpeg_path:
-            raise FileNotFoundError("Could not find ffmpeg. Please install it first.")
+            error_msg = "Could not find ffmpeg."
+            if getattr(sys, 'frozen', False):
+                error_msg += " Application may not be properly installed or ffmpeg not bundled correctly."
+                error_msg += f" Searched in: {sys.executable} directory"
+            else:
+                error_msg += " Please install it first (e.g., brew install ffmpeg)."
+            self.logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
             
         # 检查输入文件
         if not os.path.exists(self.video_path):
@@ -278,7 +322,7 @@ class VideoProcessor(QRunnable):
             cmd = [ffmpeg_path]
             
             # 添加硬件加速（如果可用）
-            if self.optimized_config['use_hardware_accel']:
+            if self.use_hardware_accel:
                 cmd.extend(["-hwaccel", "videotoolbox"])
                 self.logger.info("Using VideoToolbox hardware acceleration for audio extraction")
             
@@ -323,7 +367,7 @@ class VideoProcessor(QRunnable):
         # 初始化语音识别器（如果尚未初始化）
         if self._speech_recognizer is None:
             self.logger.info("Initializing Parakeet MLX speech recognizer...")
-            self.report_progress(25)
+            self.report_progress(12)  # 10% + 2% for initialization
             
             try:
                 # 使用默认的 Parakeet 模型，添加下载回调
@@ -347,7 +391,7 @@ class VideoProcessor(QRunnable):
                 self.signals.download_error.emit(f"Failed to initialize Parakeet MLX model: {str(e)}")
                 raise RuntimeError(f"Failed to initialize Parakeet MLX model: {str(e)}")
         
-        self.report_progress(30)  # 模型加载完成
+        self.report_progress(20)  # 模型加载完成，占用10%->20%的进度
         
         # 使用 Parakeet MLX 进行转录
         try:
@@ -360,12 +404,13 @@ class VideoProcessor(QRunnable):
                     f.write("")  # 创建空字幕文件
                 return
             
-            # 定义进度回调函数
+            # 定义进度回调函数 - 语音识别占用20%-70%的进度空间（50%的进度空间）
             def progress_callback(current_chunk, total_chunks):
                 if total_chunks > 0:
-                    chunk_progress = int((current_chunk / total_chunks) * 10)  # 10% 的进度范围
-                    progress = 30 + chunk_progress
-                    self.report_progress(min(40, progress))
+                    # 语音识别进度：20% + (current_chunk/total_chunks) * 50%
+                    recognition_progress = (current_chunk / total_chunks) * 50
+                    progress = 20 + recognition_progress
+                    self.report_progress(min(70, int(progress)))
             
             # 进行转录
             result = self._speech_recognizer.transcribe(
@@ -375,7 +420,7 @@ class VideoProcessor(QRunnable):
                 progress_callback=progress_callback
             )
             
-            self.report_progress(40)  # 转录完成
+            self.report_progress(70)  # 转录完成，确保达到70%
             
             # 使用字幕格式化器生成 SRT 格式
             srt_content = SubtitleFormatter.to_srt(result, highlight_words=False)
@@ -412,8 +457,7 @@ class VideoProcessor(QRunnable):
                         entries.append({
                             'id': current_id,
                             'timestamp': current_timestamp,
-                            'text': '\n'.join(current_text),
-                            'translated': False
+                            'text': '\n'.join(current_text)
                         })
                     # 重置状态为解析新条目的ID
                     current_id = None
@@ -436,36 +480,20 @@ class VideoProcessor(QRunnable):
                 entries.append({
                     'id': current_id,
                     'timestamp': current_timestamp,
-                    'text': '\n'.join(current_text),
-                    'translated': False
+                    'text': '\n'.join(current_text)
                 })
 
-            # Use ThreadPool for Parallel Translation with intelligent batching
-            translated_entries = []
-            translation_lock = threading.Lock()
             total_entries = len(entries)
-            completed_count = 0
-            
             if total_entries == 0:
                 self.logger.warning("No valid subtitle entries found to translate")
                 return ""
                 
-            self.logger.info(f"Starting translation of {total_entries} subtitle entries")
+            self.logger.info(f"Starting batch translation of {total_entries} subtitle entries")
             
-            # 使用批量翻译 - 至少需要4个段落
-            if self._should_use_batch_translation(entries):
-                self.logger.info("Using optimized batch translation for efficiency")
-                batch_result = self._batch_translate_openai(entries)
-                if batch_result:
-                    translated_entries = batch_result
-                    self.signals.file_progress.emit(self.base_name, 70)  # 批量完成，直接到70%
-                else:
-                    # 批量失败，回退到单独翻译
-                    self.logger.info("Batch translation failed, using individual translation")
-                    translated_entries = self._translate_individually(entries, translation_lock, total_entries)
-            else:
-                # 使用单独翻译（Google翻译或条目太少）
-                translated_entries = self._translate_individually(entries, translation_lock, total_entries)
+            # 批量翻译所有字幕 (70% -> 80%)
+            self.report_progress(72)
+            translated_entries = self._batch_translate_all(entries)
+            self.report_progress(80)
 
             # Sort by ID to Ensure Correct Subtitle Ordering
             translated_entries.sort(key=lambda x: x['id'])
@@ -481,143 +509,312 @@ class VideoProcessor(QRunnable):
             self.signals.error.emit(f"Translation Process Failed: {str(e)}")
             raise
 
-    def _translate_entry(self, entry):
-        """Individual Subtitle Item Translation Handling with intelligent retry logic"""
-        max_attempts = 3
-        base_delay = 1  # 基础延迟时间（秒）
-        
-        for attempt in range(1, max_attempts + 1):
-            try:
-                if self.engine == "OpenAI Translate":
-                    return self._translate_with_openai(entry)
-                else:  # Google Translation
-                    return self._translate_with_google(entry)
-            except ContentFilteredException as cf_e:
-                # Content filtering is not retryable - return original text immediately
-                self.logger.info(f"Content filtered for subtitle {entry['id']}, using original text: {entry['text'][:50]}...")
-                return entry['text']  # Return original text when content is filtered
-            except Exception as e:
-                if attempt == max_attempts:
-                    self.logger.error(f"Max attempts reached for subtitle {entry['id']}: {str(e)}")
-                    raise
-                
-                # 根据错误类型决定延迟策略
-                if "429" in str(e) or "rate limit" in str(e).lower():
-                    # 速率限制错误，使用更长的延迟
-                    delay = base_delay * (3 ** (attempt - 1))
-                    self.logger.warning(f"Rate limit hit for subtitle {entry['id']}, waiting {delay}s before retry {attempt + 1}")
-                elif "timeout" in str(e).lower() or "connection" in str(e).lower():
-                    # 网络错误，使用中等延迟
-                    delay = base_delay * (2 ** (attempt - 1))
-                    self.logger.warning(f"Network error for subtitle {entry['id']}, retrying in {delay}s: {str(e)}")
-                else:
-                    # 其他错误，使用标准延迟
-                    delay = base_delay * (1.5 ** (attempt - 1))
-                    self.logger.warning(f"Translation attempt {attempt} failed for subtitle {entry['id']}, retrying in {delay}s: {str(e)}")
-                
-                time.sleep(delay)
+    def _batch_translate_all(self, entries):
+        """批量翻译所有字幕条目"""
+        if self.engine == "OpenAI Translate":
+            return self._batch_translate_with_openai(entries)
+        else:  # Google Translation
+            return self._batch_translate_with_google(entries)
+    
+    """
+    外部调用
+    ↓
+    _batch_translate_with_openai (调度器)
+    ↓
+    ├─ 内容少 → _translate_openai_batch (单次处理)
+    └─ 内容多 → _translate_openai_multiple_batches (分批管理)
+                    ↓
+                    循环调用 → _translate_openai_batch (具体执行)
+    """
 
-    def _translate_with_openai(self, entry):
-        """Use OpenAI for Single Subtitle Translation with session reuse and enhanced caching"""
-        # 检查缓存
-        cached_translation = self._get_cached_translation(entry['text'], "openai")
-        if cached_translation:
-            return cached_translation
+    def _batch_translate_with_openai(self, entries):
+        """使用OpenAI API批量翻译所有字幕 - 使用段落分隔符方案"""
+        try:
+            # 从配置文件获取批处理参数
+            max_chars_per_batch = self.api_settings.get("max_chars_per_batch", OPENAI_MAX_CHARS_PER_BATCH)
+            max_entries_per_batch = self.api_settings.get("max_entries_per_batch", OPENAI_MAX_ENTRIES_PER_BATCH)
+            
+            total_chars = sum(len(entry['text']) for entry in entries)
+            
+            if total_chars <= max_chars_per_batch and len(entries) <= max_entries_per_batch:
+                # 内容较少，使用单一批量请求
+                self.logger.info(f"Content size {total_chars} chars, {len(entries)} entries - using single batch request")
+                return self._translate_openai_batch(entries)
+            else:
+                # 内容过多，需要分批处理
+                self.logger.info(f"Content size {total_chars} chars, {len(entries)} entries - using multiple batch processing")
+                return self._translate_openai_multiple_batches(entries, max_chars_per_batch, max_entries_per_batch)
+                
+        except Exception as e:
+            self.logger.error(f"OpenAI batch translation failed: {str(e)}")
+            raise
+    
+    def _translate_openai_batch(self, entries):
+        """OpenAI单批次翻译 - 使用段落分隔符方案"""
+        # 构建翻译文本 - 使用 %% 分隔符
+        if len(entries) == 1:
+            # 单段落，直接翻译
+            text_to_translate = entries[0]['text']
+        else:
+            # 多段落，使用 %% 分隔
+            texts = [entry['text'] for entry in entries]
+            text_to_translate = '\n%%\n'.join(texts)
         
         # 使用配置文件中的自定义prompt
         system_prompt = OPENAI_CUSTOM_PROMPT
+
+        user_prompt = f"Translate to Chinese (output translation only):\n\n{text_to_translate}"
         
-        user_prompt = f"Translate to Chinese (output translation only):\n\n{entry['text']}"
-            
         data = {
             "model": self.api_settings.get("model", OPENAI_MODEL),
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "temperature": 0,  # 降低温度以获得更一致的翻译
-            "max_tokens": 1000
+            "temperature": 0,
+            "max_tokens": 8000  # 适中的token限制
         }
 
-        try:
-            response = self.session.post(
-                f"{self.api_settings['base_url']}/v1/chat/completions",
-                json=data,
-                timeout=30
-            )
+        response = self.session.post(
+            f"{self.api_settings['base_url']}/v1/chat/completions",
+            json=data,
+            timeout=300
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if 'choices' not in result or not result['choices']:
+                raise ValueError(f"Invalid API response structure: {result}")
             
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    # 检查响应结构
-                    if 'choices' not in result or not result['choices']:
-                        raise ValueError(f"Invalid API response structure: {result}")
-                    
-                    choice = result['choices'][0]
-                    
-                    # 检查是否被内容过滤器阻止
-                    if choice.get('finish_reason') == 'content_filter':
-                        # 如果被内容过滤器阻止，抛出特定异常
-                        raise ContentFilteredException(f"Content filtered by OpenAI safety system for entry: {entry['text'][:50]}...")
-                    else:
-                        # 正常的响应处理
-                        if 'message' not in choice or 'content' not in choice['message']:
-                            raise ValueError(f"Invalid message structure in API response: {result}")
-                        
-                        content = choice['message']['content'].strip()
-                        if not content:
-                            raise ValueError("Empty response from OpenAI API")
-                    
-                    # 缓存结果
-                    self._set_cached_translation(entry['text'], "openai", content)
-                    return content
-                except json.JSONDecodeError as json_err:
-                    # 记录原始响应内容以便调试
-                    response_text = response.text[:500]  # 限制长度避免日志过长
-                    self.logger.error(f"JSON decode error. Response text: {response_text}")
-                    raise requests.exceptions.RequestException(f"Invalid JSON response from OpenAI API: {str(json_err)}")
-                except (KeyError, IndexError, ValueError) as struct_err:
-                    # 响应结构错误
-                    self.logger.error(f"API response structure error: {str(struct_err)}")
-                    raise requests.exceptions.RequestException(f"Invalid API response structure: {str(struct_err)}")
-            elif response.status_code == 429:  # 速率限制
-                raise requests.exceptions.RequestException(f"Rate limit exceeded: {response.status_code}")
+            choice = result['choices'][0]
+            
+            if choice.get('finish_reason') == 'content_filter':
+                raise ContentFilteredException("Batch translation content filtered by OpenAI safety system")
+            
+            if 'message' not in choice or 'content' not in choice['message']:
+                raise ValueError(f"Invalid message structure in API response: {result}")
+            
+            translated_content = choice['message']['content'].strip()
+            
+            # 解析翻译结果
+            if len(entries) == 1:
+                # 单段落
+                translated_texts = [translated_content]
             else:
-                raise requests.exceptions.RequestException(f"OpenAI API error: {response.status_code} - {response.text}")
-                
-        except requests.exceptions.Timeout:
-            raise requests.exceptions.RequestException("OpenAI API request timeout")
-        except requests.exceptions.ConnectionError:
-            raise requests.exceptions.RequestException("OpenAI API connection error")
-
-    def _translate_with_google(self, entry):
-        """Translated using the Deep Translator with better error handling and enhanced caching."""
-        # 检查缓存
-        cached_translation = self._get_cached_translation(entry['text'], "google")
-        if cached_translation:
-            return cached_translation
+                # 多段落，按 %% 分割
+                if '\n%%\n' in translated_content:
+                    translated_texts = translated_content.split('\n%%\n')
+                elif '%%' in translated_content:
+                    translated_texts = translated_content.split('%%')
+                else:
+                    # 如果没有找到分隔符，可能是单个翻译结果，按行数分割
+                    lines = translated_content.split('\n')
+                    if len(lines) >= len(entries):
+                        translated_texts = lines[:len(entries)]
+                    else:
+                        translated_texts = [translated_content]  # 使用整个翻译作为第一个结果
             
+            # 确保翻译结果数量匹配
+            while len(translated_texts) < len(entries):
+                translated_texts.append(entries[len(translated_texts)]['text'])  # 使用原文填充
+            translated_texts = translated_texts[:len(entries)]  # 截断多余的结果
+            
+            # 构建最终结果
+            translated_entries = []
+            for i, entry in enumerate(entries):
+                translated_text = translated_texts[i].strip() if i < len(translated_texts) else entry['text']
+                if not translated_text:
+                    translated_text = entry['text']  # 如果翻译为空，使用原文
+                
+                translated_entries.append({
+                    'id': entry['id'],
+                    'timestamp': entry['timestamp'],
+                    'text': f"{entry['text']}\n{translated_text}"
+                })
+            
+            self.logger.info(f"Successfully translated {len(translated_entries)} entries via OpenAI paragraph batch")
+            return translated_entries
+                
+        else:
+            raise requests.exceptions.RequestException(f"OpenAI API error: {response.status_code} - {response.text}")
+    
+    def _translate_openai_multiple_batches(self, entries, max_chars=None, max_entries=None):
+        """OpenAI多批次翻译 - 使用段落分隔符方案"""
+        # 使用传入的参数或默认配置值
+        if max_chars is None:
+            max_chars = OPENAI_MAX_CHARS_PER_BATCH
+        if max_entries is None:
+            max_entries = OPENAI_MAX_ENTRIES_PER_BATCH
+            
+        all_translated = []
+        batches = []
+        current_batch = []
+        current_chars = 0
+        
+        # 构建批次
+        for entry in entries:
+            entry_length = len(entry['text'])
+            
+            # 检查是否需要新批次
+            if (len(current_batch) >= max_entries or 
+                current_chars + entry_length > max_chars) and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+            
+            current_batch.append(entry)
+            current_chars += entry_length
+        
+        # 添加最后一个批次
+        if current_batch:
+            batches.append(current_batch)
+        
+        self.logger.info(f"Split into {len(batches)} batches for OpenAI paragraph translation")
+        
+        # 逐批次翻译
+        for i, batch in enumerate(batches):
+            try:
+                self.logger.info(f"Translating batch {i+1}/{len(batches)} with {len(batch)} entries")
+                
+                # 使用单批次翻译函数
+                translated_batch = self._translate_openai_batch(batch)
+                all_translated.extend(translated_batch)
+                
+                # 发出进度信号 - 使用正确的进度报告方法
+                progress = 72 + int((i + 1) / len(batches) * 8)
+                self.report_progress(min(80, progress))
+                
+                # 批次间适当延迟，避免API限制
+                if i < len(batches) - 1:
+                    time.sleep(0.1)
+                    
+            except Exception as e:
+                self.logger.error(f"Failed to translate batch {i+1}: {str(e)}")
+                # 如果批次翻译失败，保留原文
+                failed_batch = []
+                for entry in batch:
+                    failed_batch.append({
+                        'id': entry['id'],
+                        'timestamp': entry['timestamp'],
+                        'text': entry['text']  # 保持原文
+                    })
+                all_translated.extend(failed_batch)
+        
+        self.logger.info(f"Completed OpenAI paragraph translation: {len(all_translated)} entries")
+        return all_translated
+    
+    def _batch_translate_with_google(self, entries):
+        """使用Google Translate批量翻译所有字幕，支持分批处理大文本"""
         try:
-            text_to_translate = entry['text'].strip()
-            if not text_to_translate:
-                raise ValueError("Empty text to translate")
+            separator = "\n---SUBTITLE_SEPARATOR---\n"
+            max_chars = 4500  # 留一些余量，避免超过5000字符限制
+            translated_entries = []
+            
+            # 分批处理字幕条目
+            current_batch = []
+            current_length = 0
+            batch_count = 0
+            
+            # 先计算总批次数以便显示进度
+            total_batches = 1
+            temp_length = 0
+            for entry in entries:
+                entry_length = len(entry['text']) + len(separator)
+                if temp_length + entry_length > max_chars and temp_length > 0:
+                    total_batches += 1
+                    temp_length = entry_length
+                else:
+                    temp_length += entry_length
+            
+            for entry in entries:
+                entry_text = entry['text']
+                entry_length = len(entry_text) + len(separator)
                 
-            translator = GoogleTranslator(source='auto', target='zh-CN')
-            translated_text = translator.translate(text_to_translate)
+                # 如果添加当前条目会超过限制，先处理当前批次
+                if current_length + entry_length > max_chars and current_batch:
+                    batch_count += 1
+                    self.logger.info(f"Processing Google Translate batch {batch_count}/{total_batches} ({len(current_batch)} entries, {current_length} chars)")
+                    
+                    # 更新进度 (72% -> 80% 的范围内)
+                    progress = 72 + int((batch_count / total_batches) * 8)
+                    self.report_progress(min(80, progress))
+                    
+                    batch_results = self._translate_google_batch(current_batch, separator)
+                    translated_entries.extend(batch_results)
+                    
+                    # 重置批次
+                    current_batch = []
+                    current_length = 0
+                
+                current_batch.append(entry)
+                current_length += entry_length
             
-            if not translated_text:
-                raise ValueError("Empty translation result from Google Translate")
+            # 处理最后一批
+            if current_batch:
+                batch_count += 1
+                self.logger.info(f"Processing final Google Translate batch {batch_count}/{total_batches} ({len(current_batch)} entries, {current_length} chars)")
+                batch_results = self._translate_google_batch(current_batch, separator)
+                translated_entries.extend(batch_results)
             
-            # 缓存结果
-            self._set_cached_translation(entry['text'], "google", translated_text)
-            return translated_text
+            self.logger.info(f"Successfully translated {len(translated_entries)} entries via Google Translate in {batch_count} batches")
+            return translated_entries
+            
         except Exception as e:
-            raise Exception(f"Google Translate error: {str(e)}")
+            self.logger.error(f"Google Translate batch translation failed: {str(e)}")
+            raise
+    
+    def _translate_google_batch(self, entries, separator):
+        """翻译一个批次的字幕条目"""
+        # 提取所有需要翻译的文本
+        texts_to_translate = [entry['text'] for entry in entries]
+        
+        # 使用分隔符将所有文本合并成一个大字符串
+        combined_text = separator.join(texts_to_translate)
+        
+        # 使用Deep Translator进行批量翻译
+        translator = GoogleTranslator(source='auto', target='zh-CN')
+        translated_combined = translator.translate(combined_text)
+        
+        if not translated_combined:
+            raise ValueError("Empty response from Google Translate")
+        
+        # 分割翻译结果
+        translated_texts = translated_combined.split(separator)
+        
+        # 确保翻译结果数量匹配
+        if len(translated_texts) != len(entries):
+            self.logger.warning(f"Translation count mismatch: expected {len(entries)}, got {len(translated_texts)}")
+            # 填充缺失的翻译
+            while len(translated_texts) < len(entries):
+                translated_texts.append("")
+            translated_texts = translated_texts[:len(entries)]
+        
+        # 构建翻译结果
+        batch_results = []
+        for i, entry in enumerate(entries):
+            translated_text = translated_texts[i].strip() if i < len(translated_texts) else ""
+            if not translated_text:
+                translated_text = entry['text']  # 如果翻译失败，使用原文
+            
+            batch_results.append({
+                'id': entry['id'],
+                'timestamp': entry['timestamp'],
+                'text': f"{entry['text']}\n{translated_text}"
+            })
+        
+        return batch_results
 
     def burn_subtitles(self, subtitle_path, output_path):
         ffmpeg_path = self.get_ffmpeg_path()
         if not ffmpeg_path:
-            raise FileNotFoundError("Could not find ffmpeg. Please install it first.")
+            error_msg = "Could not find ffmpeg."
+            if getattr(sys, 'frozen', False):
+                error_msg += " Application may not be properly installed or ffmpeg not bundled correctly."
+                error_msg += f" Searched in: {sys.executable} directory and Contents/MacOS"
+            else:
+                error_msg += " Please install it first (e.g., brew install ffmpeg)."
+            self.logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
             
         # 检查输入文件
         if not os.path.exists(subtitle_path):
@@ -656,9 +853,9 @@ class VideoProcessor(QRunnable):
                 universal_newlines=True
             )
             
-            # 监控进度 (70% -> 100%)
-            progress_start = 70
-            progress_range = 30
+            # 监控进度 (80% -> 100%)
+            progress_start = 80
+            progress_range = 20
             
             stderr_output = ""
             while True:
@@ -688,301 +885,6 @@ class VideoProcessor(QRunnable):
             self.logger.error(error_msg)
             raise RuntimeError(error_msg)
 
-    def _should_use_batch_translation(self, entries):
-        """判断是否应该使用批量翻译，基于更智能的启发式算法"""
-        if self.engine != "OpenAI Translate":
-            return False
-            
-        if len(entries) < 3:  # 降低批量翻译门槛
-            return False
-            
-        # 分析字幕特征
-        total_chars = sum(len(entry['text']) for entry in entries)
-        avg_chars = total_chars / len(entries)
-        short_entries = sum(1 for entry in entries if len(entry['text']) < 120)  # 稍微增加短字幕的长度门槛
-        
-        # 如果大部分字幕都很短且平均长度合适，使用批量翻译
-        short_ratio = short_entries / len(entries)
-        
-        # 更积极的判断条件 - 优先使用批量翻译
-        return (
-            short_ratio > 0.4 and  # 40%以上是短字幕
-            avg_chars < 100 and    # 平均长度限制
-            len(entries) <= 30 and # 增加批量处理的条目数
-            total_chars < 2000     # 增加总字符数限制，利用更大的context window
-        )
-    
-    def _batch_translate_openai(self, entries):
-        """批量翻译短字幕以提高效率 - 动态批次大小优化"""
-        # 根据条目数量和平均长度动态调整批次大小
-        avg_chars = sum(len(entry['text']) for entry in entries) / len(entries)
-        
-        if avg_chars < 30:
-            batch_size = min(8, len(entries))  # 非常短的文本，更大批次
-        elif avg_chars < 60:
-            batch_size = min(6, len(entries))  # 短文本，中等批次
-        else:
-            batch_size = min(4, len(entries))  # 较长文本，小批次
-            
-        all_translated_entries = []
-        
-        # 并行处理多个批次
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        
-        # 将所有批次准备好
-        batch_tasks = []
-        for i in range(0, len(entries), batch_size):
-            batch_entries = entries[i:i + batch_size]
-            batch_tasks.append((i // batch_size, batch_entries))
-        
-        # 使用较少的线程处理批量翻译以避免API限制
-        max_batch_workers = min(3, len(batch_tasks))
-        
-        with ThreadPoolExecutor(max_workers=max_batch_workers) as executor:
-            future_to_batch = {
-                executor.submit(self._process_single_batch, batch_id, batch_entries): (batch_id, batch_entries)
-                for batch_id, batch_entries in batch_tasks
-            }
-            
-            for future in as_completed(future_to_batch):
-                batch_id, batch_entries = future_to_batch[future]
-                try:
-                    batch_result = future.result()
-                    if batch_result:
-                        all_translated_entries.extend(batch_result)
-                    else:
-                        # 如果批量翻译失败，记录但不退出
-                        self.logger.warning(f"Batch {batch_id} translation failed, will use individual translation for these entries")
-                        return None
-                except Exception as e:
-                    self.logger.warning(f"Batch {batch_id} failed with error: {str(e)}")
-                    return None
-        
-        # 检查翻译完整性
-        if len(all_translated_entries) >= len(entries) * 0.85:  # 提高成功率要求到85%
-            return all_translated_entries
-        else:
-            self.logger.warning(f"Batch translation incomplete: {len(all_translated_entries)}/{len(entries)} entries")
-            return None
 
-    def _process_single_batch(self, batch_id, batch_entries):
-        """处理单个批次的翻译"""
-        # 使用JSON格式而不是%%分隔符，更可靠
-        if len(batch_entries) == 1:
-            # 单段落输入，直接使用文本
-            batch_text = batch_entries[0]['text']
-            is_single = True
-        else:
-            # 多段落输入，使用JSON格式
-            batch_data = []
-            for i, entry in enumerate(batch_entries):
-                batch_data.append({
-                    "id": i,
-                    "text": entry['text']
-                })
-            batch_text = json.dumps(batch_data, ensure_ascii=False, indent=2)
-            is_single = False
-        
-        # 使用配置文件中的自定义prompt
-        system_prompt = OPENAI_CUSTOM_PROMPT
-        
-        if is_single:
-            user_prompt = f"Translate to Chinese (output translation only):\n\n{batch_text}"
-        else:
-            user_prompt = f"Translate the text field of each JSON object to Chinese and return the same JSON structure with translated text:\n\n{batch_text}"
-        
-        data = {
-            "model": self.api_settings.get("model", OPENAI_MODEL),
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "temperature": 0,
-            "max_tokens": 3000  # 增加token限制
-        }
-
-        try:
-            response = self.session.post(
-                f"{self.api_settings['base_url']}/v1/chat/completions",
-                json=data,
-                timeout=90  # 增加超时时间
-            )
-            
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if 'choices' not in result or not result['choices']:
-                        raise ValueError(f"Invalid API response structure: {result}")
-                    
-                    choice = result['choices'][0]
-                    
-                    if choice.get('finish_reason') == 'content_filter':
-                        raise ContentFilteredException("Batch translation content filtered by OpenAI safety system")
-                    else:
-                        if 'message' not in choice or 'content' not in choice['message']:
-                            raise ValueError(f"Invalid message structure in API response: {result}")
-                        
-                        content = choice['message']['content'].strip()
-                except json.JSONDecodeError as json_err:
-                    response_text = response.text[:500]
-                    self.logger.error(f"Batch {batch_id} JSON decode error. Response text: {response_text}")
-                    raise Exception(f"Invalid JSON response from OpenAI API: {str(json_err)}")
-                except (KeyError, IndexError, ValueError) as struct_err:
-                    self.logger.error(f"Batch {batch_id} API response structure error: {str(struct_err)}")
-                    raise Exception(f"Invalid API response structure: {str(struct_err)}")
-                
-                # 解析翻译结果
-                if is_single:
-                    translations = [content]
-                else:
-                    try:
-                        # 尝试解析JSON响应
-                        translated_data = json.loads(content)
-                        if isinstance(translated_data, list):
-                            translations = [item.get('text', '') for item in translated_data]
-                        else:
-                            raise ValueError("Expected JSON array response")
-                    except (json.JSONDecodeError, ValueError):
-                        # 如果JSON解析失败，回退到%%分隔符
-                        if "\n%%\n" in content:
-                            translations = content.split("\n%%\n")
-                        elif "%%" in content:
-                            translations = content.split("%%")
-                        else:
-                            translations = [line.strip() for line in content.split('\n') if line.strip()]
-                
-                # 构建结果
-                batch_results = []
-                for j, entry in enumerate(batch_entries):
-                    if j < len(translations) and translations[j].strip():
-                        batch_results.append({
-                            'id': entry['id'],
-                            'timestamp': entry['timestamp'],
-                            'text': f"{entry['text']}\n{translations[j].strip()}"
-                        })
-                    else:
-                        self.logger.warning(f"Translation missing for entry {entry['id']} in batch {batch_id}")
-                        batch_results.append({
-                            'id': entry['id'],
-                            'timestamp': entry['timestamp'],
-                            'text': entry['text']
-                        })
-                
-                return batch_results
-                        
-            else:
-                raise requests.exceptions.RequestException(f"OpenAI API error: {response.status_code}")
-                
-        except Exception as e:
-            self.logger.warning(f"Batch {batch_id} translation failed: {str(e)}")
-            return None
-
-    def _translate_individually(self, entries, translation_lock, total_entries):
-        """使用多线程进行单独翻译"""
-        translated_entries = []
-        completed_count = 0
-        
-        # 使用系统优化的线程配置
-        optimal_workers = (self.optimized_config['openai_workers'] 
-                         if self.engine == "OpenAI Translate" 
-                         else self.optimized_config['google_workers'])
-        
-        self.logger.info(f"Using {optimal_workers} threads for {self.engine} translation")
-        
-        with ThreadPoolExecutor(max_workers=optimal_workers) as executor:
-            # 创建任务
-            future_to_entry = {
-                executor.submit(self._translate_entry, entry): entry
-                for entry in entries
-            }
-
-            # 收集翻译结果 - 使用线程安全的方式
-            for future in as_completed(future_to_entry):
-                entry = future_to_entry[future]
-                try:
-                    translated_text = future.result()
-                    if translated_text:  # 确保有翻译结果
-                        with translation_lock:  # 线程安全的添加
-                            translated_entries.append({
-                                'id': entry['id'],
-                                'timestamp': entry['timestamp'],
-                                'text': f"{entry['text']}\n{translated_text}"
-                            })
-                            completed_count += 1
-                            
-                            # 更新进度 - 基于实际完成数量
-                            progress = 40 + completed_count / total_entries * 30
-                            self.signals.file_progress.emit(self.base_name, int(progress))
-                    else:
-                        self.logger.warning(f"Empty translation for subtitle ID {entry['id']}")
-                except Exception as e:
-                    error_msg = f"Subtitle {entry['id']} translation failed: {str(e)}"
-                    self.logger.error(error_msg)
-                    # 只记录错误，不发送信号避免UI混乱
-                    with translation_lock:
-                        completed_count += 1
-                        progress = 40 + completed_count / total_entries * 30
-                        self.signals.file_progress.emit(self.base_name, int(progress))
-                    continue
-                    
-        return translated_entries
-
-    def _load_translation_cache(self):
-        """加载持久化翻译缓存"""
-        try:
-            if os.path.exists(self._cache_file):
-                with open(self._cache_file, 'r', encoding='utf-8') as f:
-                    cached_data = json.load(f)
-                    # 只加载最近的缓存条目（避免缓存过大）
-                    if len(cached_data) > 1000:
-                        # 保留最新的1000个条目
-                        sorted_items = sorted(cached_data.items(), key=lambda x: x[1].get('timestamp', 0), reverse=True)
-                        self._translation_cache = dict(sorted_items[:1000])
-                    else:
-                        self._translation_cache = cached_data
-                    self.logger.info(f"Loaded {len(self._translation_cache)} cached translations")
-        except Exception as e:
-            self.logger.warning(f"Failed to load translation cache: {e}")
-            self._translation_cache = {}
-
-    def _save_translation_cache(self):
-        """保存翻译缓存到文件"""
-        try:
-            # 添加时间戳到缓存条目
-            current_time = time.time()
-            for key in self._translation_cache:
-                if isinstance(self._translation_cache[key], str):
-                    # 转换旧格式到新格式
-                    self._translation_cache[key] = {
-                        'translation': self._translation_cache[key],
-                        'timestamp': current_time
-                    }
-                elif 'timestamp' not in self._translation_cache[key]:
-                    self._translation_cache[key]['timestamp'] = current_time
-            
-            with open(self._cache_file, 'w', encoding='utf-8') as f:
-                json.dump(self._translation_cache, f, ensure_ascii=False, indent=2)
-            self.logger.info(f"Saved {len(self._translation_cache)} translations to cache")
-        except Exception as e:
-            self.logger.warning(f"Failed to save translation cache: {e}")
-
-    def _get_cached_translation(self, text, engine):
-        """获取缓存的翻译"""
-        cache_key = f"{engine}_{hash(text)}"
-        if cache_key in self._translation_cache:
-            cached_item = self._translation_cache[cache_key]
-            if isinstance(cached_item, dict):
-                return cached_item.get('translation')
-            else:
-                return cached_item  # 向后兼容旧格式
-        return None
-
-    def _set_cached_translation(self, text, engine, translation):
-        """设置翻译缓存"""
-        cache_key = f"{engine}_{hash(text)}"
-        self._translation_cache[cache_key] = {
-            'translation': translation,
-            'timestamp': time.time()
-        }
 
 
