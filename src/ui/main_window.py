@@ -113,6 +113,7 @@ class SubtitleProcessor(QWidget):
         
         # 下载对话框管理
         self.download_dialog = None
+        self.model_already_loaded = False  # 跟踪模型是否已经加载过
 
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
@@ -331,10 +332,10 @@ class SubtitleProcessor(QWidget):
                         processor.logger.cleanup()
                     except:
                         pass
-                if hasattr(processor, '_whisper_model') and processor._whisper_model is not None:
+                if hasattr(processor, '_speech_recognizer') and processor._speech_recognizer is not None:
                     try:
-                        del processor._whisper_model
-                        processor._whisper_model = None
+                        del processor._speech_recognizer
+                        processor._speech_recognizer = None
                     except:
                         pass
                         
@@ -365,10 +366,10 @@ class SubtitleProcessor(QWidget):
                         processor.logger.cleanup()
                     except:
                         pass
-                if hasattr(processor, '_whisper_model') and processor._whisper_model is not None:
+                if hasattr(processor, '_speech_recognizer') and processor._speech_recognizer is not None:
                     try:
-                        del processor._whisper_model
-                        processor._whisper_model = None
+                        del processor._speech_recognizer
+                        processor._speech_recognizer = None
                     except:
                         pass
                         
@@ -473,10 +474,10 @@ class SubtitleProcessor(QWidget):
                         processor.logger.cleanup()
                     except:
                         pass
-                if hasattr(processor, '_whisper_model') and processor._whisper_model is not None:
+                if hasattr(processor, '_speech_recognizer') and processor._speech_recognizer is not None:
                     try:
-                        del processor._whisper_model
-                        processor._whisper_model = None
+                        del processor._speech_recognizer
+                        processor._speech_recognizer = None
                     except:
                         pass
             
@@ -489,6 +490,10 @@ class SubtitleProcessor(QWidget):
 
     def show_download_dialog(self, model_name):
         """显示下载进度对话框"""
+        # 如果模型已经加载过，就不显示下载对话框
+        if self.model_already_loaded:
+            return
+            
         if self.download_dialog is None:
             self.download_dialog = DownloadDialog(self)
         
@@ -499,16 +504,21 @@ class SubtitleProcessor(QWidget):
     
     def update_download_progress(self, percentage, downloaded_mb, total_mb, speed_mbps):
         """更新下载进度"""
+        if self.model_already_loaded:
+            return
         if self.download_dialog:
             self.download_dialog.update_progress(percentage, downloaded_mb, total_mb, speed_mbps)
     
     def update_download_status(self, message):
         """更新下载状态"""
+        if self.model_already_loaded:
+            return
         if self.download_dialog:
             self.download_dialog.update_status(message)
     
     def download_completed(self):
         """下载完成处理"""
+        self.model_already_loaded = True  # 标记模型已经加载完成
         if self.download_dialog:
             self.download_dialog.set_completed()
     
@@ -521,6 +531,6 @@ class SubtitleProcessor(QWidget):
             QMessageBox.critical(
                 self, 
                 "Download Error", 
-                f"Failed to download Whisper model:\n{error_message}", 
+                f"Failed to download speech recognition model:\n{error_message}", 
                 QMessageBox.StandardButton.Ok
             )

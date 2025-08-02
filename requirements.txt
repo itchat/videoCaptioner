@@ -1,6 +1,6 @@
 PyQt6
 qt-material
-pywhispercpp
+parakeet-mlx
 requests
 py2app
 deep-translator

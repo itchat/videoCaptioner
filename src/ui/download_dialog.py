@@ -11,9 +11,9 @@ class DownloadDialog(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Downloading Whisper Model")
+        self.setWindowTitle("Downloading Parakeet MLX Model")
         self.setFixedSize(1000, 500)  # 增大窗口尺寸
-        self.setWindowFlags(Qt.Dialog | Qt.WindowCloseButtonHint)
+        self.setWindowFlags(Qt.WindowType.Dialog | Qt.WindowType.WindowCloseButtonHint)
         self.setModal(False)  # 设置为非模态，用户可以关闭
         
         self.init_ui()
@@ -69,7 +69,7 @@ class DownloadDialog(QDialog):
         layout.setContentsMargins(20, 20, 20, 20)
         
         # 标题
-        title_label = QLabel("Downloading Whisper Model")
+        title_label = QLabel("Downloading Parakeet MLX Model")
         title_font = QFont()
         title_font.setPointSize(14)
         title_font.setBold(True)
@@ -78,7 +78,7 @@ class DownloadDialog(QDialog):
         layout.addWidget(title_label)
         
         # 描述
-        desc_label = QLabel("First-time setup: Downloading Distil-Whisper distil-large-v3.5 model...\nThis may take a few minutes depending on your internet connection.")
+        desc_label = QLabel("First-time setup: Downloading Parakeet MLX model...\nThis may take a few minutes depending on your internet connection.")
         desc_label.setWordWrap(True)
         desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         desc_label.setStyleSheet("color: #cccccc; font-size: 11px;")

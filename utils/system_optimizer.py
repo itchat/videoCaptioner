@@ -96,7 +96,7 @@ class SystemOptimizer:
         cpu_count = self.system_info['cpu_count']
         
         config = {
-            'whisper_threads': min(8, cpu_count),  # Whisper处理线程
+            'parakeet_threads': min(8, cpu_count),  # Parakeet MLX 处理线程
             'translation_threads_openai': min(9, max(3, (cpu_count // 4) * 3)),  # OpenAI翻译线程 - 增加三倍
             'translation_threads_google': min(15, max(6, (cpu_count // 2) * 3)),  # Google翻译线程 - 增加三倍
             'main_thread_pool': min(4, max(2, cpu_count // 2)),  # 主线程池
@@ -105,10 +105,10 @@ class SystemOptimizer:
         
         # Apple Silicon优化
         if self.system_info.get('is_apple_silicon', False):
-            config['whisper_threads'] = min(10, cpu_count)  # Apple Silicon对AI任务优化更好
+            config['parakeet_threads'] = min(10, cpu_count)  # Apple Silicon对AI任务优化更好
             config['translation_threads_openai'] = min(18, (cpu_count // 3) * 4)  # Apple Silicon优化
             config['translation_threads_google'] = min(30, (cpu_count // 2) * 4)  # Apple Silicon优化
-            config['reasoning'].append("🍎 Apple Silicon detected - increased Whisper and translation threads for ML optimization")
+            config['reasoning'].append("🍎 Apple Silicon detected - increased Parakeet MLX and translation threads for ML optimization")
         
         # 高核心数CPU优化
         if cpu_count >= 8:
@@ -124,7 +124,7 @@ class SystemOptimizer:
         # 内存考虑
         memory_gb = self.system_info.get('memory_gb', 8)
         if memory_gb < 8:
-            config['whisper_threads'] = min(4, config['whisper_threads'])
+            config['parakeet_threads'] = min(4, config['parakeet_threads'])
             config['main_thread_pool'] = min(2, config['main_thread_pool'])
             config['reasoning'].append(f"💾 Limited memory ({memory_gb}GB) - reduced threading to prevent swapping")
         elif memory_gb >= 16:
@@ -137,7 +137,7 @@ class SystemOptimizer:
         deps_info = {
             'ffmpeg_available': False,
             'ffmpeg_hardware_support': False,
-            'whisper_model_available': False,
+            'parakeet_model_available': False,
             'issues': [],
             'recommendations': []
         }
@@ -159,19 +159,14 @@ class SystemOptimizer:
         except Exception:
             deps_info['issues'].append("❌ FFmpeg not found - video processing will fail")
         
-        # 检查Whisper模型
-        model_paths = [
-            os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "ggml-distil-large-v3.5.bin"),
-            os.path.expanduser("~/.whisper_models/ggml-distil-large-v3.5.bin")
-        ]
-        
-        for model_path in model_paths:
-            if os.path.exists(model_path):
-                deps_info['whisper_model_available'] = True
-                deps_info['recommendations'].append(f"✅ Whisper model found at: {model_path}")
-                break
-        else:
-            deps_info['issues'].append("⚠️ Whisper model not found - will download on first use")
+        # 检查Parakeet MLX模型
+        try:
+            # Parakeet MLX 模型会在首次使用时自动下载，这里只是检查包是否可用
+            import parakeet_mlx
+            deps_info['parakeet_model_available'] = True
+            deps_info['recommendations'].append("✅ Parakeet MLX package available")
+        except ImportError:
+            deps_info['issues'].append("⚠️ Parakeet MLX package not found - will need to install parakeet-mlx")
         
         return deps_info
     
@@ -205,7 +200,7 @@ class SystemOptimizer:
         
         # 线程配置
         report.append("\n⚙️ OPTIMAL THREAD CONFIGURATION:")
-        report.append(f"  Whisper Processing: {thread_config['whisper_threads']} threads")
+        report.append(f"  Parakeet MLX Processing: {thread_config['parakeet_threads']} threads")
         report.append(f"  OpenAI Translation: {thread_config['translation_threads_openai']} threads")
         report.append(f"  Google Translation: {thread_config['translation_threads_google']} threads")
         report.append(f"  Main Thread Pool: {thread_config['main_thread_pool']} threads")
@@ -252,7 +247,7 @@ class SystemOptimizer:
         hw_accel = self.check_hardware_acceleration()
         
         return {
-            'whisper_threads': thread_config['whisper_threads'],
+            'parakeet_threads': thread_config['parakeet_threads'],
             'openai_workers': thread_config['translation_threads_openai'],
             'google_workers': thread_config['translation_threads_google'],
             'main_pool_size': thread_config['main_thread_pool'],

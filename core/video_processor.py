@@ -7,9 +7,9 @@ from PyQt6.QtCore import QRunnable
 import os
 import subprocess
 from datetime import datetime
-from pywhispercpp.model import Model
 from deep_translator import GoogleTranslator
 from core.worker_signals import WorkerSignals
+from core.speech_recognizer import SpeechRecognizer, SubtitleFormatter
 from utils.logger import VideoLogger
 from utils.system_optimizer import SystemOptimizer
 import threading
@@ -54,8 +54,8 @@ class VideoProcessor(QRunnable):
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
         
-        # Whisper模型缓存 - 避免重复加载
-        self._whisper_model = None
+        # 语音识别器 - 使用 Parakeet MLX
+        self._speech_recognizer = None
     
         # 跟踪处理状态以确保正确清理
         self._processing_complete = False
@@ -116,170 +116,6 @@ class VideoProcessor(QRunnable):
         minutes = int(elapsed_seconds // 60)
         seconds = int(elapsed_seconds % 60)
         return f"{minutes:02d}:{seconds:02d}"
-
-    def get_whisper_model_path(self):
-        # 检测是否在打包环境中运行
-        is_bundled = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
-        
-        # 定义模型下载URL - 使用 Distil-Whisper distil-large-v3.5
-        model_url = "https://huggingface.co/distil-whisper/distil-large-v3.5-ggml/resolve/main/ggml-model.bin"
-        
-        # 优先使用用户目录（特别是在打包环境中）
-        user_model_dir = os.path.expanduser("~/.whisper_models")
-        user_model_path = os.path.join(user_model_dir, "ggml-distil-large-v3.5.bin")
-        
-        if os.path.exists(user_model_path):
-            self.logger.info(f"Found user model: {user_model_path}")
-            # Validate existing model file
-            if self._validate_model_file(user_model_path):
-                return user_model_path
-            else:
-                self.logger.warning("Existing user model file is corrupted, will re-download")
-                try:
-                    os.remove(user_model_path)
-                    self.logger.info("Removed corrupted user model file")
-                except Exception as e:
-                    self.logger.error(f"Failed to remove corrupted file: {e}")
-        
-        # 在非打包环境下，检查应用内部模型路径
-        if not is_bundled:
-            app_model_dir = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), 
-                "models"
-            )
-            app_model_path = os.path.join(app_model_dir, "ggml-distil-large-v3.5.bin")
-            
-            if os.path.exists(app_model_path):
-                self.logger.info(f"Found app model: {app_model_path}")
-                # Validate existing app model file``
-                if self._validate_model_file(app_model_path):
-                    return app_model_path
-                else:
-                    self.logger.warning("Existing app model file is corrupted, will download to user directory")
-        
-        # 下载模型到用户目录（适用于所有环境）
-        try:
-            os.makedirs(user_model_dir, exist_ok=True)
-            
-            # 发送下载开始信号
-            self.signals.download_started.emit("Distil-Whisper distil-large-v3.5")
-            self.signals.download_status.emit("Initializing model download...")
-            
-            # 下载模型到用户目录
-            self.logger.info("Downloading Distil-Whisper distil-large-v3.5 model to user directory...")
-            self.report_status("Downloading Whisper model (first time only)...")
-            
-            import time
-            start_time = time.time()
-            
-            response = requests.get(model_url, stream=True)
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            last_time = start_time
-            last_downloaded = 0
-            
-            self.signals.download_status.emit(f"Downloading from {model_url}")
-            
-            with open(user_model_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        
-                        # 计算并发送下载进度
-                        if total_size > 0:
-                            progress = min(100, int((downloaded / total_size) * 100))
-                            downloaded_mb = downloaded / (1024 * 1024)
-                            total_mb = total_size / (1024 * 1024)
-                            
-                            # 计算下载速度（每秒更新一次）
-                            current_time = time.time()
-                            if current_time - last_time >= 1.0:
-                                speed_bytes_per_sec = (downloaded - last_downloaded) / (current_time - last_time)
-                                speed_mbps = speed_bytes_per_sec / (1024 * 1024)
-                                
-                                # 发送下载进度信号
-                                self.signals.download_progress.emit(progress, downloaded_mb, total_mb, speed_mbps)
-                                
-                                last_time = current_time
-                                last_downloaded = downloaded
-                            
-                            # 更新文件处理进度（限制在20%以内）
-                            file_progress = min(20, progress // 5)
-                            self.report_progress(file_progress)
-            
-            self.logger.info(f"Model downloaded to: {user_model_path}")
-            
-            # Validate downloaded model file
-            if not self._validate_model_file(user_model_path):
-                self.logger.error("Downloaded model file failed validation")
-                # Remove corrupted file
-                try:
-                    os.remove(user_model_path)
-                    self.logger.info("Removed corrupted model file")
-                except Exception as remove_error:
-                    self.logger.error(f"Failed to remove corrupted file: {remove_error}")
-                
-                self.signals.download_error.emit("Downloaded model file is corrupted. Please try again.")
-                raise RuntimeError("Downloaded model file failed validation")
-            
-            self.signals.download_completed.emit()
-            self.signals.download_status.emit("Model download completed successfully!")
-            return user_model_path
-            
-        except Exception as e:
-            self.logger.error(f"Failed to download model: {str(e)}")
-            self.signals.download_error.emit(f"Failed to download Whisper model: {str(e)}")
-            raise RuntimeError(f"Failed to download Whisper model: {str(e)}")
-
-    def _validate_model_file(self, model_path):
-        """Validate the integrity of the downloaded Whisper model file"""
-        try:
-            # Check if file exists
-            if not os.path.exists(model_path):
-                self.logger.error(f"Model file does not exist: {model_path}")
-                return False
-            
-            # Check file size (Distil-Whisper distil-large-v3.5 should be around 756MB)
-            file_size = os.path.getsize(model_path)
-            min_size = 1.4 * 1024 * 1024 * 1024  # 700 MB minimum
-            max_size = 1.9 * 1024 * 1024 * 1024  # 800 MB maximum
-            
-            if file_size < min_size:
-                self.logger.error(f"Model file too small: {file_size / (1024**3):.2f} GB")
-                return False
-            
-            if file_size > max_size:
-                self.logger.error(f"Model file too large: {file_size / (1024**3):.2f} GB")
-                return False
-            
-            # Check file header (GGML models start with specific magic bytes)
-            with open(model_path, 'rb') as f:
-                header = f.read(8)
-                
-                # GGML files can start with 'ggml', 'GGML', or 'lmgg' (little-endian)
-                valid_headers = [b'ggml', b'GGML', b'lmgg', b'GMGL']
-                if not any(header.startswith(h) for h in valid_headers):
-                    self.logger.error(f"Invalid model file header: {header[:4]}")
-                    return False
-            
-            # Additional check: ensure file is not truncated
-            # Try to read from the end of the file
-            with open(model_path, 'rb') as f:
-                f.seek(-1024, 2)  # Seek to last 1KB
-                end_data = f.read(1024)
-                if len(end_data) != 1024:
-                    self.logger.error("Model file appears to be truncated")
-                    return False
-            
-            self.logger.info(f"Model file validation passed: {file_size / (1024**3):.2f} GB")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Model file validation failed: {str(e)}")
-            return False
 
     def report_progress(self, progress):
         self.signals.file_progress.emit(self.base_name, progress)
@@ -361,10 +197,10 @@ class VideoProcessor(QRunnable):
                 if hasattr(self, 'session'):
                     self.session.close()
                     
-                # 释放Whisper模型内存
-                if hasattr(self, '_whisper_model') and self._whisper_model is not None:
-                    del self._whisper_model
-                    self._whisper_model = None
+                # 释放语音识别器内存
+                if hasattr(self, '_speech_recognizer') and self._speech_recognizer is not None:
+                    del self._speech_recognizer
+                    self._speech_recognizer = None
                     
                 # 清理日志处理器
                 if hasattr(self, 'logger'):
@@ -483,47 +319,37 @@ class VideoProcessor(QRunnable):
             raise RuntimeError(error_msg)
 
     def generate_subtitles(self, audio_path, srt_path):
-        # 使用缓存的 Whisper 模型提高效率
-        if self._whisper_model is None:
-            self.logger.info("Loading Distil-Whisper distil-large-v3.5 model with whisper.cpp...")
-            self.report_progress(25)  # 更细粒度的进度反馈
+        """使用 Parakeet MLX 生成字幕"""
+        # 初始化语音识别器（如果尚未初始化）
+        if self._speech_recognizer is None:
+            self.logger.info("Initializing Parakeet MLX speech recognizer...")
+            self.report_progress(25)
             
             try:
-                # 获取模型路径
-                model_path = self.get_whisper_model_path()
+                # 使用默认的 Parakeet 模型，添加下载回调
+                self._speech_recognizer = SpeechRecognizer(
+                    model_name="mlx-community/parakeet-tdt-0.6b-v2",
+                    fp32=False,  # 使用 bfloat16 精度以节省内存
+                    local_attention=True,  # 使用局部注意力减少内存使用
+                    local_attention_context_size=256,
+                    logger=self.logger,
+                    download_callback=lambda model_name: self.signals.download_started.emit(model_name),
+                    progress_callback=lambda percentage, downloaded_mb, total_mb, speed_mbps: (
+                        self.signals.download_progress.emit(percentage, downloaded_mb, total_mb, speed_mbps),
+                        self.signals.download_completed.emit() if percentage == 100 else None
+                    )[0],  # 只返回第一个结果
+                    status_callback=lambda message: self.signals.download_status.emit(message)
+                )
+                self.logger.info("Parakeet MLX model initialized successfully")
                 
-                # 初始化模型并检查硬件加速选项
-                self.logger.info("Initializing Whisper model with hardware acceleration options")
-                
-                try:
-                    # 使用系统优化的线程配置
-                    n_threads = self.optimized_config['whisper_threads']
-                    
-                    self.logger.info(f"Using optimized {n_threads} threads for Whisper processing")
-                    self._whisper_model = Model(
-                        model_path,
-                        n_threads=n_threads,
-                        print_realtime=False,
-                        print_progress=False
-                    )
-                    
-                    self.logger.info("Whisper model initialized with system-optimized threading")
-                    
-                except Exception as model_error:
-                    # 如果带参数初始化失败，回退到默认初始化
-                    self.logger.warning(f"Failed to initialize with optimization parameters: {model_error}")
-                    self.logger.info("Falling back to default initialization")
-                    self._whisper_model = Model(model_path)
-                    
-                self.logger.info("Whisper model loaded successfully")
-                    
             except Exception as e:
-                self.logger.error(f"Failed to load Whisper model: {str(e)}")
-                raise RuntimeError(f"Failed to load Whisper model: {str(e)}")
-            
+                self.logger.error(f"Failed to initialize Parakeet MLX model: {str(e)}")
+                self.signals.download_error.emit(f"Failed to initialize Parakeet MLX model: {str(e)}")
+                raise RuntimeError(f"Failed to initialize Parakeet MLX model: {str(e)}")
+        
         self.report_progress(30)  # 模型加载完成
         
-        # 使用 pywhispercpp 进行转录
+        # 使用 Parakeet MLX 进行转录
         try:
             self.logger.info(f"Starting transcription of: {audio_path}")
             
@@ -534,44 +360,37 @@ class VideoProcessor(QRunnable):
                     f.write("")  # 创建空字幕文件
                 return
             
-            # pywhispercpp 转录 - 直接返回 Segment 对象列表
-            segments = self._whisper_model.transcribe(audio_path)
+            # 定义进度回调函数
+            def progress_callback(current_chunk, total_chunks):
+                if total_chunks > 0:
+                    chunk_progress = int((current_chunk / total_chunks) * 10)  # 10% 的进度范围
+                    progress = 30 + chunk_progress
+                    self.report_progress(min(40, progress))
             
-            self.report_progress(35)  # 转录开始
+            # 进行转录
+            result = self._speech_recognizer.transcribe(
+                audio_path,
+                chunk_duration=120.0,  # 2分钟分块
+                overlap_duration=15.0,  # 15秒重叠
+                progress_callback=progress_callback
+            )
             
-            # 将结果写入 SRT 文件
+            self.report_progress(40)  # 转录完成
+            
+            # 使用字幕格式化器生成 SRT 格式
+            srt_content = SubtitleFormatter.to_srt(result, highlight_words=False)
+            
+            # 写入 SRT 文件
             with open(srt_path, "w", encoding="utf-8") as f:
-                segment_count = 0
+                f.write(srt_content)
                 
-                for i, segment in enumerate(segments):
-                    # pywhispercpp 的时间戳是厘秒（centiseconds，10ms），需要转换为秒
-                    start_time = segment.t0 / 100.0  # 厘秒转换为秒
-                    end_time = segment.t1 / 100.0    # 厘秒转换为秒
-                    text = segment.text.strip()
-                    
-                    if text:  # 只写入非空文本
-                        start = self.format_time(start_time)
-                        end = self.format_time(end_time)
-                        f.write(f"{i + 1}\n{start} --> {end}\n{text}\n\n")
-                        segment_count += 1
-                        
-                    # 更新进度 (35% -> 40%)
-                    if i % 10 == 0 and len(segments) > 0:
-                        progress = 35 + min(5, (i / len(segments)) * 5)
-                        self.report_progress(int(progress))
-                        
+            # 统计生成的字幕段数
+            segment_count = len(result.sentences)
             self.logger.info(f"Transcription completed, generated {segment_count} segments")
             
         except Exception as e:
             self.logger.error(f"Transcription failed: {str(e)}")
             raise RuntimeError(f"Transcription failed: {str(e)}")
-
-    @staticmethod
-    def format_time(seconds):
-        hours = int(seconds // 3600)
-        minutes = int((seconds % 3600) // 60)
-        seconds = seconds % 60
-        return f"{hours:02}:{minutes:02}:{seconds:06.3f}".replace(".", ",")
 
     def translate_subtitles(self, lines):
         try:
