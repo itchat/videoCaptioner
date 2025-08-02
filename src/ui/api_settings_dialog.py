@@ -108,7 +108,7 @@ class ApiSettingsDialog(QDialog):
         # Max Entries Per Batch
         self.max_entries_label = QLabel("Max Entries Per Batch", self)
         self.max_entries_spinbox = QSpinBox(self)
-        self.max_entries_spinbox.setRange(1, 200)  # 扩大范围以支持更多条目
+        self.max_entries_spinbox.setRange(1, 2000)  # 扩大范围以支持更多条目
         self.max_entries_spinbox.setValue(self.api_settings.get("max_entries_per_batch", DEFAULT_MAX_ENTRIES_PER_BATCH))
         self.max_entries_spinbox.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)  # 移除增减按钮
         self.max_entries_spinbox.setStyleSheet(
