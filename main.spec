@@ -31,7 +31,7 @@ a = Analysis(
     ['src/main.py'],
     pathex=[],
     binaries=[
-        (ffmpeg_path, 'Frameworks'),  # 将 ffmpeg 放在 Contents/Frameworks 目录
+        (ffmpeg_path, '.'),  # 将 ffmpeg 放在 Contents/Frameworks 目录
         (f'{conda_env_path}/lib/python3.13/site-packages/mlx/lib/mlx.metallib', 'mlx'),
     ],
     datas=[
