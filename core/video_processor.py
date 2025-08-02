@@ -827,15 +827,16 @@ class VideoProcessor(QRunnable):
             raise ValueError(f"Error reading subtitle file {subtitle_path}: {str(e)}")
             
         try:
-            # 使用更高效的字幕烧录方法，包含进度更新
+            # 优化的硬件加速字幕烧录命令，更激进的压缩
             cmd = [
                 ffmpeg_path,
                 "-hwaccel", "videotoolbox",
                 "-i", self.video_path,
                 "-vf", f"subtitles='{subtitle_path}':force_style='FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=4'",
                 "-c:v", "h264_videotoolbox",
+                "-b:v", "0",  # 使用变动比特率模式
+                "-q:v", "52", # VideoToolbox质量参数调整为55，更激进的压缩
                 "-c:a", "copy",
-                "-preset", "medium",  # 更好的质量和压缩比
                 "-movflags", "+faststart",  # 优化在线播放
                 output_path,
                 "-y"  # 覆盖已存在的文件
