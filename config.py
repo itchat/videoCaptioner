@@ -1,5 +1,7 @@
 import os
 import json
+import platform
+import subprocess
 
 # Default values
 OPENAI_BASE_URL = "https://api.openai.com"  # 默认 OpenAI 平台
@@ -8,11 +10,33 @@ OPENAI_MODEL = "gpt-4.1-nano"
 
 # 批处理参数默认值
 DEFAULT_MAX_CHARS_PER_BATCH = 3600
-DEFAULT_MAX_ENTRIES_PER_BATCH = 10
+DEFAULT_MAX_ENTRIES_PER_BATCH = 100
+
+# 多进程配置默认值
+def _get_default_max_processes():
+    """根据系统动态获取默认最大进程数"""
+    try:
+        if platform.system() == 'Darwin':  # macOS
+            # 检测是否是Apple Silicon
+            result = subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], 
+                                  capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip() == '1':
+                return 6  # Apple Silicon 可以处理更多并发
+            else:
+                return 3  # Intel Mac
+        else:
+            return 2  # 其他系统保守一些
+    except Exception:
+        return 2  # 默认值
+
+DEFAULT_MAX_PROCESSES = _get_default_max_processes()
 
 # 当前批处理参数，会被load_config修改
 OPENAI_MAX_CHARS_PER_BATCH = DEFAULT_MAX_CHARS_PER_BATCH
 OPENAI_MAX_ENTRIES_PER_BATCH = DEFAULT_MAX_ENTRIES_PER_BATCH
+
+# 当前多进程参数，会被load_config修改
+MAX_PROCESSES = DEFAULT_MAX_PROCESSES
 
 # 原始默认prompt，不会被load_config修改
 DEFAULT_CUSTOM_PROMPT = """You are a professional Chinese native translator who needs to fluently translate text into Chinese.
@@ -38,7 +62,7 @@ CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 def load_config():
     """Load configuration from file"""
     global OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
-    global OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH
+    global OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES
 
     # Create config directory if it doesn't exist
     if not os.path.exists(CONFIG_DIR):
@@ -55,14 +79,15 @@ def load_config():
                 OPENAI_CUSTOM_PROMPT = config.get("custom_prompt", DEFAULT_CUSTOM_PROMPT)
                 OPENAI_MAX_CHARS_PER_BATCH = config.get("max_chars_per_batch", DEFAULT_MAX_CHARS_PER_BATCH)
                 OPENAI_MAX_ENTRIES_PER_BATCH = config.get("max_entries_per_batch", DEFAULT_MAX_ENTRIES_PER_BATCH)
+                MAX_PROCESSES = config.get("max_processes", DEFAULT_MAX_PROCESSES)
         except Exception as e:
             print(f"Error loading config: {e}")
 
 
-def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per_batch=None, max_entries_per_batch=None):
+def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per_batch=None, max_entries_per_batch=None, max_processes=None):
     """Save configuration to file"""
     global OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
-    global OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH
+    global OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES
     
     # Create config directory if it doesn't exist
     if not os.path.exists(CONFIG_DIR):
@@ -76,7 +101,8 @@ def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per
             "model": model if model is not None else "gpt-4.1-nano",
             "custom_prompt": custom_prompt if custom_prompt is not None else DEFAULT_CUSTOM_PROMPT,
             "max_chars_per_batch": max_chars_per_batch if max_chars_per_batch is not None else DEFAULT_MAX_CHARS_PER_BATCH,
-            "max_entries_per_batch": max_entries_per_batch if max_entries_per_batch is not None else DEFAULT_MAX_ENTRIES_PER_BATCH
+            "max_entries_per_batch": max_entries_per_batch if max_entries_per_batch is not None else DEFAULT_MAX_ENTRIES_PER_BATCH,
+            "max_processes": max_processes if max_processes is not None else DEFAULT_MAX_PROCESSES
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
@@ -88,6 +114,7 @@ def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per
         OPENAI_CUSTOM_PROMPT = custom_prompt if custom_prompt is not None else DEFAULT_CUSTOM_PROMPT
         OPENAI_MAX_CHARS_PER_BATCH = max_chars_per_batch if max_chars_per_batch is not None else DEFAULT_MAX_CHARS_PER_BATCH
         OPENAI_MAX_ENTRIES_PER_BATCH = max_entries_per_batch if max_entries_per_batch is not None else DEFAULT_MAX_ENTRIES_PER_BATCH
+        MAX_PROCESSES = max_processes if max_processes is not None else DEFAULT_MAX_PROCESSES
 
         return True
     except Exception as e:

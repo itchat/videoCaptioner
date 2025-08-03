@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QApplication,
 )
-from PyQt6.QtCore import Qt, QThreadPool
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QAction, QShortcut
 import os
 import platform
@@ -18,8 +18,9 @@ from .drop_area import DropArea
 from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
 from .download_dialog import DownloadDialog
-from core.video_processor import VideoProcessor
+from core.video_processor import MultiprocessVideoManager
 from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, save_config
+import multiprocessing as mp
 
 
 class MainWindow(QMainWindow):
@@ -71,7 +72,11 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
-        # 清理资源
+        # 清理多进程管理器资源
+        if hasattr(self.central_widget, 'multiprocess_manager'):
+            self.central_widget.multiprocess_manager.shutdown()
+        
+        # 清理其他资源
         self.central_widget.cleanup_on_exit()
         self.central_widget.reset_ui_state()
         event.accept()
@@ -94,13 +99,35 @@ class SubtitleProcessor(QWidget):
             "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH
         }
         
-        # 优化的线程池配置以避免语音识别并发问题
-        import multiprocessing
-        cpu_count = multiprocessing.cpu_count()
+        # 初始化多进程管理器而不是线程池
+        self.init_multiprocess_manager()
         
-        # 对于语音识别任务，限制并发数以避免 MLX 模型冲突
-        # Apple Silicon 设备建议最多2个并发，其他设备建议1个
+        self.file_paths = []
+        self.cache_dir = os.path.expanduser("~/Desktop/videoCache")
+        self.progress_widgets = {}
+        self.is_processing = False
+        self.active_process_ids = set()  # 跟踪活跃的进程ID
+        self.completed_processes = 0  # 跟踪已完成的进程数量
+        self.total_processes = 0  # 跟踪总进程数量
+        
+        # 创建定时器用于检查进程状态
+        self.process_timer = QTimer()
+        self.process_timer.timeout.connect(self.check_process_updates)
+        self.process_timer.setInterval(100)  # 每100ms检查一次
+        
+        # 下载对话框管理
+        self.download_dialog = None
+        self.model_already_loaded = False  # 跟踪模型是否已经加载过
+
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
+    
+    def init_multiprocess_manager(self):
+        """初始化多进程管理器"""
+        # 确定最大进程数
+        cpu_count = mp.cpu_count()
         is_apple_silicon = False
+        
         if platform.system() == 'Darwin':
             try:
                 result = subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], 
@@ -109,35 +136,19 @@ class SubtitleProcessor(QWidget):
             except Exception:
                 pass
         
-        # 保守的线程池设置：优先稳定性而不是并发性能
+        # 保守的进程数设置
         if is_apple_silicon:
-            optimal_pool_size = 4  # Apple Silicon 最多2个并发
+            max_processes = min(4, cpu_count)  # Apple Silicon最多4个进程
         else:
-            optimal_pool_size = 2  # 其他平台限制为1个以确保稳定性
+            max_processes = min(2, cpu_count)  # 其他平台最多2个进程
         
-        self.thread_pool = QThreadPool()
-        self.thread_pool.setMaxThreadCount(optimal_pool_size)
+        self.multiprocess_manager = MultiprocessVideoManager(max_processes=max_processes)
         
-        print(f"🔧 Thread pool size: {optimal_pool_size} threads (optimized for speech recognition)")
+        print(f"🔧 Multiprocess manager initialized with {max_processes} max processes")
         print(f"💻 System: {platform.system()} - {cpu_count} cores")
         
         if is_apple_silicon:
-            print("🍎 Apple Silicon detected - using optimized concurrency")
-        
-        self.file_paths = []  # 改名为更通用的file_paths
-        self.cache_dir = os.path.expanduser("~/Desktop/videoCache")
-        self.progress_widgets = {}
-        self.is_processing = False
-        self.active_processors = []  # 跟踪活跃的处理器
-        self.completed_processors = 0  # 跟踪已完成的处理器数量
-        self.total_processors = 0  # 跟踪总处理器数量
-        
-        # 下载对话框管理
-        self.download_dialog = None
-        self.model_already_loaded = False  # 跟踪模型是否已经加载过
-
-        if not os.path.exists(self.cache_dir):
-            os.makedirs(self.cache_dir)
+            print("🍎 Apple Silicon detected - using optimized multiprocessing")
 
     def init_ui(self):
         main_layout = QVBoxLayout()
@@ -249,76 +260,135 @@ class SubtitleProcessor(QWidget):
         if self.progress_widgets:
             self.clear_button.setEnabled(True)
 
+    def clear_progress_history(self):
+        """清除进度历史"""
+        if not self.is_processing:
+            while self.progress_layout.count():
+                child = self.progress_layout.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
+            self.progress_widgets = {}
+            self.clear_button.setEnabled(False)
+
     def process_files(self):
-        """处理视频文件"""
+        """处理视频文件 - 多进程版本"""
         if not self.file_paths:
             QMessageBox.warning(
                 self, "Warning", "Select the file before processing", QMessageBox.StandardButton.Ok
             )
             return
 
-        # 只处理视频文件
-        self.video_paths = self.file_paths
+        # 直接处理视频
         self.process_videos()
 
     def process_videos(self):
-        if not self.video_paths:
-            QMessageBox.warning(
-                self, "Warning", "Select the file before processing", QMessageBox.StandardButton.Ok
-            )
-            return
+        """处理视频 - 多进程版本"""
+        if not hasattr(self, 'video_paths') or not self.video_paths:
+            # 如果没有video_paths，使用file_paths
+            if not self.file_paths:
+                QMessageBox.warning(
+                    self, "Warning", "Select the file before processing", QMessageBox.StandardButton.Ok
+                )
+                return
+            self.video_paths = self.file_paths
 
-        # Cleaning progress display area
+        # 清理进度显示区域
         while self.progress_layout.count():
             child = self.progress_layout.takeAt(0)
             if child.widget():
                 child.widget().deleteLater()
         self.progress_widgets = {}
 
-        # Set a new progress display
+        # 设置新的进度显示
         self.setup_progress_widgets()
 
+        # 禁用UI控件
         self.start_button.setEnabled(False)
         self.engine_selector.setEnabled(False)
         self.settings_button.setEnabled(False)
-        self.clear_button.setEnabled(False)  # 处理时禁用清除按钮
+        self.clear_button.setEnabled(False)
         self.is_processing = True
         self.drop_area.setEnabled(False)
         
-        # 重置计数器
-        self.completed_processors = 0
-        self.total_processors = len(self.video_paths)
-        self.active_processors.clear()
+        # 重置计数器和跟踪器
+        self.completed_processes = 0
+        self.total_processes = len(self.video_paths)
+        self.active_process_ids.clear()
 
+        # 启动所有视频处理进程
         for video_path in self.video_paths:
             try:
-                processor = VideoProcessor(
+                process_id = self.multiprocess_manager.submit_video(
                     video_path=video_path,
                     engine=self.engine_selector.currentText(),
                     api_settings=self.api_settings,
-                    cache_dir=self.cache_dir,
+                    cache_dir=self.cache_dir
                 )
-
-                # 跟踪处理器
-                self.active_processors.append(processor)
                 
-                processor.signals.file_progress.connect(self.update_file_progress)
-                processor.signals.status.connect(self.update_file_status)
-                processor.signals.error.connect(self.handle_error)
-                processor.signals.finished.connect(self.handle_finished)
-                processor.signals.timer_update.connect(self.update_file_timer)
+                self.active_process_ids.add(process_id)
+                print(f"🚀 Submitted video {os.path.basename(video_path)} to process {process_id}")
                 
-                # 连接下载相关信号
-                processor.signals.download_started.connect(self.show_download_dialog)
-                processor.signals.download_progress.connect(self.update_download_progress)
-                processor.signals.download_status.connect(self.update_download_status)
-                processor.signals.download_completed.connect(self.download_completed)
-                processor.signals.download_error.connect(self.download_error)
-
-                self.thread_pool.start(processor)
-
             except Exception as e:
-                self.handle_error(f"Error starting processor: {str(e)}")
+                self.handle_error(f"Error starting processor for {os.path.basename(video_path)}: {str(e)}")
+
+        # 启动定时器检查进程状态
+        self.process_timer.start()
+    
+    def check_process_updates(self):
+        """检查进程更新 - 定时器回调"""
+        try:
+            # 获取进度更新
+            progress_updates = self.multiprocess_manager.get_progress_updates()
+            for update in progress_updates:
+                if update['type'] == 'progress':
+                    self.update_file_progress(update['base_name'], update['progress'])
+                    if 'elapsed_time' in update:
+                        self.update_file_timer(update['base_name'], update['elapsed_time'])
+                elif update['type'] == 'status':
+                    self.update_file_status(update['base_name'], update['status'])
+            
+            # 获取处理结果
+            results = self.multiprocess_manager.get_results()
+            for result in results:
+                process_id = result['process_id']
+                video_path = result['video_path']
+                base_name = os.path.basename(video_path)
+                
+                if process_id in self.active_process_ids:
+                    self.active_process_ids.remove(process_id)
+                    self.completed_processes += 1
+                    
+                    if result['status'] == 'success':
+                        print(f"✅ Process {process_id} completed successfully: {base_name}")
+                        if base_name in self.progress_widgets:
+                            self.progress_widgets[base_name].update_status("Processing completed!")
+                            self.progress_widgets[base_name].update_progress(100)
+                    elif result['status'] == 'error':
+                        error_msg = result.get('error', 'Unknown error')
+                        print(f"❌ Process {process_id} failed: {base_name} - {error_msg}")
+                        self.handle_error(f"Failed to process {base_name}: {error_msg}")
+                    
+                    # 检查是否所有进程都已完成
+                    if self.completed_processes >= self.total_processes:
+                        self.all_processes_completed()
+            
+        except Exception as e:
+            print(f"Error checking process updates: {str(e)}")
+    
+    def all_processes_completed(self):
+        """所有进程完成后的处理"""
+        print("🎉 All video processing completed")
+        
+        # 停止定时器
+        self.process_timer.stop()
+        
+        # 重置状态
+        self.reset_ui_state_keep_progress()
+        
+        # 显示完成消息
+        QMessageBox.information(
+            self, "Processing", "All processing is complete!", QMessageBox.StandardButton.Ok
+        )
 
     def update_file_progress(self, file_name, progress):
         if file_name in self.progress_widgets:
@@ -333,66 +403,17 @@ class SubtitleProcessor(QWidget):
             self.progress_widgets[file_name].update_timer(elapsed_time)
 
     def handle_error(self, error_message):
-        # 增加已完成的处理器计数（包括错误的情况）
-        self.completed_processors += 1
-        
-        QMessageBox.critical(self, "Processing error", error_message, QMessageBox.StandardButton.Ok)
-        
-        # 检查是否所有任务都已完成（包括错误的）
-        if self.completed_processors >= self.total_processors:
-            # 清理处理器列表并释放资源
-            for processor in self.active_processors:
-                # 确保每个处理器的资源被正确清理
-                if hasattr(processor, 'session'):
-                    try:
-                        processor.session.close()
-                    except:
-                        pass
-                if hasattr(processor, 'logger'):
-                    try:
-                        processor.logger.cleanup()
-                    except:
-                        pass
-                        
-            self.active_processors.clear()
-            # 重置计数器
-            self.completed_processors = 0
-            self.total_processors = 0
-            
-            # 重置UI状态，但保留进度条
-            self.reset_ui_state_keep_progress()
+        """处理错误 - 多进程版本"""
+        print(f"❌ Error: {error_message}")
+        # 注意：不需要手动管理完成计数，因为check_process_updates会处理
+        # 可以选择性地显示错误对话框
+        # QMessageBox.critical(self, "Processing error", error_message, QMessageBox.StandardButton.Ok)
 
     def handle_finished(self):
-        # 增加已完成的处理器计数
-        self.completed_processors += 1
-        
-        # 检查是否所有任务都已完成
-        if self.completed_processors >= self.total_processors:
-            # 清理处理器列表并释放资源
-            for processor in self.active_processors:
-                # 确保每个处理器的资源被正确清理
-                if hasattr(processor, 'session'):
-                    try:
-                        processor.session.close()
-                    except:
-                        pass
-                if hasattr(processor, 'logger'):
-                    try:
-                        processor.logger.cleanup()
-                    except:
-                        pass
-                        
-            self.active_processors.clear()
-            # 重置计数器
-            self.completed_processors = 0
-            self.total_processors = 0
-            
-            # 重置UI状态，但保留进度条
-            self.reset_ui_state_keep_progress()
-
-            QMessageBox.information(
-                self, "Processing", "All processing is complete!", QMessageBox.StandardButton.Ok
-            )
+        """处理完成 - 多进程版本（保留兼容性）"""
+        # 注意：在多进程版本中，完成处理由check_process_updates和all_processes_completed处理
+        # 这个方法保留是为了向后兼容，但实际上不会被调用
+        pass
 
     def open_settings(self):
         dialog = ApiSettingsDialog(self, self.api_settings)
@@ -438,64 +459,33 @@ class SubtitleProcessor(QWidget):
         self.progress_widgets = {}
 
     def reset_ui_state_keep_progress(self):
-        """重置UI状态但保留进度条"""
+        """重置UI状态但保留进度条 - 多进程版本"""
         self.is_processing = False
         self.drop_area.setEnabled(True)
-        # 重置拖拽区域为视频文件提示文本
         self.drop_area.reset_state("Drag and Drop Video Files")
-        self.file_paths = []  # 重置通用文件路径
-        # 为了兼容性，也重置video_paths（如果存在的话）
+        self.file_paths = []
         if hasattr(self, 'video_paths'):
             self.video_paths = []
         self.start_button.setEnabled(False)
         self.engine_selector.setEnabled(True)
         self.settings_button.setEnabled(True)
+        self.clear_button.setEnabled(True)  # 重新启用清除按钮
         
-        # 清理处理器列表
-        self.active_processors.clear()
-        
-        # 不清理进度显示区域，保留进度条
-        # 启用清除历史按钮，让用户可以手动清除
-        if self.progress_widgets:
-            self.clear_button.setEnabled(True)
-        
-    def clear_progress_history(self):
-        """清除历史进度条"""
-        if not self.is_processing:  # 只在没有处理任务时允许清除
-            # 清理进度显示区域
-            while self.progress_layout.count():
-                child = self.progress_layout.takeAt(0)
-                if child.widget():
-                    child.widget().deleteLater()
-            self.progress_widgets = {}
-            self.clear_button.setEnabled(False)  # 清除后禁用按钮
+        # 重置计数器
+        self.completed_processes = 0
+        self.total_processes = 0
+        self.active_process_ids.clear()
         
     def cleanup_on_exit(self):
-        """应用退出时的清理工作"""
+        """应用退出时的清理工作 - 多进程版本"""
         try:
-            # 强制清理所有活跃的处理器
-            for processor in self.active_processors:
-                if hasattr(processor, 'session'):
-                    try:
-                        processor.session.close()
-                    except:
-                        pass
-                if hasattr(processor, 'logger'):
-                    try:
-                        processor.logger.cleanup()
-                    except:
-                        pass
+            # 停止定时器
+            if hasattr(self, 'process_timer'):
+                self.process_timer.stop()
             
-            # 等待线程池完成
-            if hasattr(self, 'thread_pool'):
-                self.thread_pool.waitForDone(5000)  # 最多等待5秒
-            
-            # 清理单例模式的语音识别器
-            try:
-                from core.speech_recognizer import SpeechRecognizer
-                SpeechRecognizer.cleanup_singleton()
-            except Exception as e:
-                print(f"Error cleaning up SpeechRecognizer: {e}")
+            # 关闭多进程管理器
+            if hasattr(self, 'multiprocess_manager'):
+                self.multiprocess_manager.shutdown()
                 
         except Exception as e:
             print(f"Cleanup error: {e}")  # 使用print避免日志问题

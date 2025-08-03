@@ -13,7 +13,10 @@ from utils.logger import VideoLogger
 import threading
 import json
 import platform
-from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH
+import multiprocessing as mp
+import queue
+from typing import Dict, Any, Optional, List
+from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES
 
 
 class ContentFilteredException(Exception):
@@ -882,6 +885,897 @@ class VideoProcessor(QRunnable):
             error_msg = f"Error during FFmpeg processing: {e.stderr}"
             self.logger.error(error_msg)
             raise RuntimeError(error_msg)
+
+
+# ===== 多进程支持函数 =====
+
+def process_video_worker(
+    video_path: str,
+    engine: str,
+    api_settings: Dict[str, Any],
+    cache_dir: str,
+    progress_queue: mp.Queue,
+    result_queue: mp.Queue,
+    process_id: int
+):
+    """
+    多进程视频处理工作函数
+    
+    Args:
+        video_path: 视频文件路径
+        engine: 翻译引擎
+        api_settings: API设置
+        cache_dir: 缓存目录
+        progress_queue: 进度报告队列
+        result_queue: 结果队列
+        process_id: 进程ID
+    """
+    try:
+        # 创建处理器实例（不继承QRunnable，直接使用核心功能）
+        processor = VideoProcessorForMultiprocess(
+            video_path=video_path,
+            engine=engine,
+            api_settings=api_settings,
+            cache_dir=cache_dir,
+            progress_queue=progress_queue,
+            process_id=process_id
+        )
+        
+        # 执行处理
+        result = processor.process()
+        
+        # 发送成功结果
+        result_queue.put({
+            'process_id': process_id,
+            'video_path': video_path,
+            'status': 'success',
+            'result': result
+        })
+        
+    except Exception as e:
+        # 发送错误结果
+        result_queue.put({
+            'process_id': process_id,
+            'video_path': video_path,
+            'status': 'error',
+            'error': str(e)
+        })
+
+
+class VideoProcessorForMultiprocess:
+    """简化的视频处理器，专门用于多进程环境"""
+    
+    def __init__(self, video_path: str, engine: str, api_settings: Dict[str, Any], 
+                 cache_dir: str, progress_queue: mp.Queue, process_id: int):
+        self.video_path = video_path
+        self.engine = engine
+        self.api_settings = api_settings
+        self.cache_dir = cache_dir
+        self.progress_queue = progress_queue
+        self.process_id = process_id
+        self.base_name = os.path.basename(video_path)
+        
+        # 创建日志器实例
+        self.logger = VideoLogger(cache_dir)
+        
+        # 创建独立的requests会话
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.api_settings.get('api_key', '')}",
+            "Content-Type": "application/json"
+        })
+        
+        # 配置连接池
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=5,
+            pool_maxsize=10,
+            max_retries=3,
+            pool_block=False
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+        
+        # 继承原有的系统检测逻辑
+        self.use_hardware_accel = VideoProcessor._check_hardware_acceleration(self)
+        self.is_apple_silicon = VideoProcessor._is_apple_silicon(self)
+        
+        # 开始时间
+        self.start_time = time.time()
+    
+    def report_progress(self, progress: int):
+        """报告进度"""
+        try:
+            elapsed = time.time() - self.start_time
+            elapsed_str = self._format_elapsed_time(elapsed)
+            
+            self.progress_queue.put({
+                'type': 'progress',
+                'process_id': self.process_id,
+                'video_path': self.video_path,
+                'base_name': self.base_name,
+                'progress': progress,
+                'elapsed_time': elapsed_str
+            }, block=False)
+        except queue.Full:
+            pass  # 忽略队列满的情况，避免阻塞
+    
+    def report_status(self, status: str):
+        """报告状态"""
+        try:
+            self.progress_queue.put({
+                'type': 'status',
+                'process_id': self.process_id,
+                'video_path': self.video_path,
+                'base_name': self.base_name,
+                'status': status
+            }, block=False)
+        except queue.Full:
+            pass
+    
+    def _format_elapsed_time(self, elapsed_seconds: float) -> str:
+        """格式化经过的时间为 MM:SS 格式"""
+        minutes = int(elapsed_seconds // 60)
+        seconds = int(elapsed_seconds % 60)
+        return f"{minutes:02d}:{seconds:02d}"
+    
+    def process(self) -> Dict[str, Any]:
+        """主处理流程 - 复用原有VideoProcessor的方法"""
+        try:
+            print(f"🎬 Process {self.process_id}: Starting to process {self.base_name}")
+            
+            # 使用原有的get_cache_paths逻辑
+            cache_paths = self.get_cache_paths()
+            
+            # 音频提取 (0-10%)
+            self.report_status("Extracting audio...")
+            self.report_progress(0)
+            self.extract_audio(cache_paths['audio'])
+            self.report_progress(10)
+            
+            # 语音识别 (10-70%)
+            self.report_status("Recognizing speech...")
+            self.generate_subtitles(cache_paths['audio'], cache_paths['srt'])
+            self.report_progress(70)
+            
+            # 字幕翻译 (70-80%)
+            self.report_status("Translating subtitles...")
+            with open(cache_paths['srt'], "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            translated_content = self.translate_subtitles(lines)
+            
+            if not translated_content or translated_content.strip() == "":
+                self.report_status("Empty bilingual subtitles, skipping video synthesis")
+                self.report_progress(100)
+                return {'status': 'skipped', 'reason': 'empty_subtitles'}
+            
+            with open(cache_paths['bilingual_srt'], "w", encoding="utf-8") as f:
+                f.write(translated_content)
+            self.report_progress(80)
+            
+            # 视频合成 (80-100%)
+            self.report_status("Synthesizing video...")
+            self.burn_subtitles(cache_paths['bilingual_srt'], cache_paths['output_video'])
+            self.report_progress(100)
+            self.report_status("Processing completed!")
+            
+            return {
+                'status': 'completed',
+                'output_path': cache_paths['output_video'],
+                'cache_paths': cache_paths
+            }
+            
+        except Exception as e:
+            error_msg = f"Processing failed: {str(e)}"
+            self.report_status(error_msg)
+            raise RuntimeError(error_msg)
+        finally:
+            # 清理资源
+            try:
+                if hasattr(self, 'session'):
+                    self.session.close()
+                    
+                # 清理日志处理器
+                if hasattr(self, 'logger'):
+                    self.logger.cleanup()
+            except Exception:
+                pass
+    
+    # 以下方法直接复用VideoProcessor的方法，避免重复代码
+    def get_cache_paths(self):
+        return VideoProcessor.get_cache_paths(self)
+    
+    def get_ffmpeg_path(self):
+        return VideoProcessor.get_ffmpeg_path()
+    
+    def check_has_audio(self):
+        return VideoProcessor.check_has_audio(self)
+    
+    def extract_audio(self, audio_path):
+        return VideoProcessor.extract_audio(self, audio_path)
+    
+    def generate_subtitles(self, audio_path, srt_path):
+        """生成字幕 - 在子进程中创建独立的语音识别器"""
+        try:
+            # 在子进程中导入和初始化语音识别器
+            from core.speech_recognizer import SpeechRecognizer, SubtitleFormatter
+            
+            print(f"🎙️ Process {self.process_id}: Initializing speech recognizer...")
+            
+            # 创建进程专用的语音识别器
+            speech_recognizer = SpeechRecognizer(
+                model_name="mlx-community/parakeet-tdt-0.6b-v2",
+                fp32=False,
+                local_attention=True,
+                local_attention_context_size=256
+            )
+            
+            self.report_progress(20)
+            
+            # 检查音频文件大小
+            if os.path.getsize(audio_path) < 1000:
+                print(f"🎙️ Process {self.process_id}: Audio file is very small, creating empty subtitle")
+                with open(srt_path, "w", encoding="utf-8") as f:
+                    f.write("")
+                return
+            
+            # 进度回调函数
+            def progress_callback(current_chunk, total_chunks):
+                if total_chunks > 0:
+                    recognition_progress = (current_chunk / total_chunks) * 50
+                    progress = 20 + recognition_progress
+                    self.report_progress(min(70, int(progress)))
+            
+            # 转录
+            result = speech_recognizer.transcribe(
+                audio_path,
+                chunk_duration=120.0,
+                overlap_duration=15.0,
+                progress_callback=progress_callback
+            )
+            
+            self.report_progress(70)
+            
+            # 生成SRT格式
+            srt_content = SubtitleFormatter.to_srt(result, highlight_words=False)
+            
+            with open(srt_path, "w", encoding="utf-8") as f:
+                f.write(srt_content)
+            
+            segment_count = len(result.sentences)
+            print(f"🎙️ Process {self.process_id}: Transcription completed, {segment_count} segments")
+            
+        except Exception as e:
+            print(f"🎙️ Process {self.process_id}: Transcription failed: {str(e)}")
+            raise RuntimeError(f"Transcription failed: {str(e)}")
+    
+    def translate_subtitles(self, lines):
+        """翻译字幕 - 多进程版本，不使用signals"""
+        try:
+            # 检查是否为空字幕文件
+            if not lines or all(not line.strip() for line in lines):
+                print(f"🎙️ Process {self.process_id}: Empty subtitle file detected, skipping translation")
+                return ""
+            
+            entries = []
+            current_id = None
+            current_timestamp = ""
+            current_text = []
+            parsing_state = "id"  # 可能的状态: id, timestamp, text
+
+            for line in lines:
+                line = line.strip()
+                if not line:  # 空行表示一个字幕条目结束
+                    if current_id is not None and current_timestamp and current_text:
+                        entries.append({
+                            'id': current_id,
+                            'timestamp': current_timestamp,
+                            'text': '\n'.join(current_text)
+                        })
+                    # 重置状态为解析新条目的ID
+                    current_id = None
+                    current_timestamp = ""
+                    current_text = []
+                    parsing_state = "id"
+                    continue
+                
+                if parsing_state == "id" and line.isdigit():
+                    current_id = int(line)
+                    parsing_state = "timestamp"
+                elif parsing_state == "timestamp" and '-->' in line:
+                    current_timestamp = line
+                    parsing_state = "text"
+                elif parsing_state == "text":
+                    current_text.append(line)
+
+            # 处理文件末尾可能存在的最后一个条目
+            if current_id is not None and current_timestamp and current_text:
+                entries.append({
+                    'id': current_id,
+                    'timestamp': current_timestamp,
+                    'text': '\n'.join(current_text)
+                })
+
+            total_entries = len(entries)
+            if total_entries == 0:
+                print(f"⚠️ Process {self.process_id}: No valid subtitle entries found to translate")
+                return ""
+                
+            print(f"🎙️ Process {self.process_id}: Starting batch translation of {total_entries} subtitle entries")
+            
+            # 批量翻译所有字幕 (70% -> 80%)
+            self.report_progress(72)
+            
+            # 使用自己的翻译方法而不是父类的
+            if self.engine == "OpenAI Translate":
+                translated_entries = self._batch_translate_with_openai_multiprocess(entries)
+            else:  # Google Translation
+                translated_entries = self._batch_translate_with_google_multiprocess(entries)
+            
+            self.report_progress(80)
+
+            # Sort by ID to Ensure Correct Subtitle Ordering
+            translated_entries.sort(key=lambda x: x['id'])
+
+            # Construct Final Subtitle Content
+            translated_content = ""
+            for entry in translated_entries:
+                translated_content += f"{entry['id']}\n{entry['timestamp']}\n{entry['text']}\n\n"
+
+            return translated_content
+
+        except Exception as e:
+            error_msg = f"Translation Process Failed: {str(e)}"
+            print(f"❌ Process {self.process_id}: {error_msg}")
+            raise RuntimeError(error_msg)
+    
+    def _batch_translate_with_openai_multiprocess(self, entries):
+        """多进程版本的OpenAI翻译"""
+        try:
+            from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH
+        except ImportError:
+            # 如果导入失败，使用默认值
+            OPENAI_MAX_CHARS_PER_BATCH = 8000
+            OPENAI_MAX_ENTRIES_PER_BATCH = 50
+            OPENAI_MODEL = "gpt-3.5-turbo"
+            OPENAI_CUSTOM_PROMPT = "You are a professional translator. Translate the following text to Chinese, maintaining the original meaning and tone."
+        
+        try:
+            # 从配置文件获取批处理参数
+            max_chars_per_batch = self.api_settings.get("max_chars_per_batch", OPENAI_MAX_CHARS_PER_BATCH)
+            max_entries_per_batch = self.api_settings.get("max_entries_per_batch", OPENAI_MAX_ENTRIES_PER_BATCH)
+            
+            total_chars = sum(len(entry['text']) for entry in entries)
+            
+            if total_chars <= max_chars_per_batch and len(entries) <= max_entries_per_batch:
+                # 内容较少，使用单一批量请求
+                print(f"🎙️ Process {self.process_id}: Content size {total_chars} chars, {len(entries)} entries - using single batch request")
+                return self._translate_openai_batch_multiprocess(entries)
+            else:
+                # 内容过多，需要分批处理
+                print(f"🎙️ Process {self.process_id}: Content size {total_chars} chars, {len(entries)} entries - using multiple batch processing")
+                return self._translate_openai_multiple_batches_multiprocess(entries, max_chars_per_batch, max_entries_per_batch)
+                
+        except Exception as e:
+            print(f"❌ Process {self.process_id}: OpenAI batch translation failed: {str(e)}")
+            raise
+    
+    def _translate_openai_batch_multiprocess(self, entries):
+        """多进程版本的OpenAI单批次翻译"""
+        try:
+            from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
+        except ImportError:
+            OPENAI_MODEL = "gpt-3.5-turbo"
+            OPENAI_CUSTOM_PROMPT = "You are a professional translator. Translate the following text to Chinese, maintaining the original meaning and tone."
+        
+        # 构建翻译文本 - 使用 %% 分隔符
+        if len(entries) == 1:
+            # 单段落，直接翻译
+            text_to_translate = entries[0]['text']
+        else:
+            # 多段落，使用 %% 分隔
+            texts = [entry['text'] for entry in entries]
+            text_to_translate = '\n%%\n'.join(texts)
+        
+        # 使用配置文件中的自定义prompt
+        system_prompt = OPENAI_CUSTOM_PROMPT
+        user_prompt = f"Translate to Chinese (output translation only):\n\n{text_to_translate}"
+        
+        data = {
+            "model": self.api_settings.get("model", OPENAI_MODEL),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "temperature": 0,
+            "max_tokens": 8000  # 适中的token限制
+        }
+
+        response = self.session.post(
+            f"{self.api_settings['base_url']}/v1/chat/completions",
+            json=data,
+            timeout=300
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if 'choices' not in result or not result['choices']:
+                raise ValueError(f"Invalid API response structure: {result}")
+            
+            choice = result['choices'][0]
+            
+            if choice.get('finish_reason') == 'content_filter':
+                raise Exception("Batch translation content filtered by OpenAI safety system")
+            
+            if 'message' not in choice or 'content' not in choice['message']:
+                raise ValueError(f"Invalid message structure in API response: {result}")
+            
+            translated_content = choice['message']['content'].strip()
+            
+            # 解析翻译结果
+            if len(entries) == 1:
+                # 单段落
+                translated_texts = [translated_content]
+            else:
+                # 多段落，按 %% 分割
+                if '\n%%\n' in translated_content:
+                    translated_texts = translated_content.split('\n%%\n')
+                elif '%%' in translated_content:
+                    translated_texts = translated_content.split('%%')
+                else:
+                    # 如果没有找到分隔符，可能是单个翻译结果，按行数分割
+                    lines = translated_content.split('\n')
+                    if len(lines) >= len(entries):
+                        translated_texts = lines[:len(entries)]
+                    else:
+                        translated_texts = [translated_content]  # 使用整个翻译作为第一个结果
+            
+            # 确保翻译结果数量匹配
+            while len(translated_texts) < len(entries):
+                translated_texts.append(entries[len(translated_texts)]['text'])  # 使用原文填充
+            translated_texts = translated_texts[:len(entries)]  # 截断多余的结果
+            
+            # 构建最终结果
+            translated_entries = []
+            for i, entry in enumerate(entries):
+                translated_text = translated_texts[i].strip() if i < len(translated_texts) else entry['text']
+                if not translated_text:
+                    translated_text = entry['text']  # 如果翻译为空，使用原文
+                
+                translated_entries.append({
+                    'id': entry['id'],
+                    'timestamp': entry['timestamp'],
+                    'text': f"{entry['text']}\n{translated_text}"
+                })
+            
+            print(f"🎙️ Process {self.process_id}: Successfully translated {len(translated_entries)} entries via OpenAI")
+            return translated_entries
+                
+        else:
+            raise Exception(f"OpenAI API error: {response.status_code} - {response.text}")
+    
+    def _translate_openai_multiple_batches_multiprocess(self, entries, max_chars, max_entries):
+        """多进程版本的OpenAI多批次翻译"""
+        all_translated = []
+        batches = []
+        current_batch = []
+        current_chars = 0
+        
+        # 构建批次
+        for entry in entries:
+            entry_length = len(entry['text'])
+            
+            # 检查是否需要新批次
+            if (len(current_batch) >= max_entries or 
+                current_chars + entry_length > max_chars) and current_batch:
+                batches.append(current_batch)
+                current_batch = []
+                current_chars = 0
+            
+            current_batch.append(entry)
+            current_chars += entry_length
+        
+        # 添加最后一个批次
+        if current_batch:
+            batches.append(current_batch)
+        
+        print(f"🎙️ Process {self.process_id}: Split into {len(batches)} batches for OpenAI translation")
+        
+        # 逐批次翻译
+        for i, batch in enumerate(batches):
+            try:
+                print(f"🎙️ Process {self.process_id}: Translating batch {i+1}/{len(batches)} with {len(batch)} entries")
+                
+                # 使用单批次翻译函数
+                translated_batch = self._translate_openai_batch_multiprocess(batch)
+                all_translated.extend(translated_batch)
+                
+                # 发出进度信号
+                progress = 72 + int((i + 1) / len(batches) * 8)
+                self.report_progress(min(80, progress))
+                
+                # 批次间适当延迟，避免API限制
+                if i < len(batches) - 1:
+                    time.sleep(0.1)
+                    
+            except Exception as e:
+                print(f"❌ Process {self.process_id}: Failed to translate batch {i+1}: {str(e)}")
+                # 如果批次翻译失败，保留原文
+                failed_batch = []
+                for entry in batch:
+                    failed_batch.append({
+                        'id': entry['id'],
+                        'timestamp': entry['timestamp'],
+                        'text': entry['text']  # 保持原文
+                    })
+                all_translated.extend(failed_batch)
+        
+        print(f"🎙️ Process {self.process_id}: Completed OpenAI translation: {len(all_translated)} entries")
+        return all_translated
+    
+    def _batch_translate_with_google_multiprocess(self, entries):
+        """多进程版本的Google翻译"""
+        try:
+            separator = "\n---SUBTITLE_SEPARATOR---\n"
+            max_chars = 4500  # 留一些余量，避免超过5000字符限制
+            translated_entries = []
+            
+            # 分批处理字幕条目
+            current_batch = []
+            current_length = 0
+            batch_count = 0
+            
+            # 先计算总批次数以便显示进度
+            total_batches = 1
+            temp_length = 0
+            for entry in entries:
+                entry_length = len(entry['text']) + len(separator)
+                if temp_length + entry_length > max_chars and temp_length > 0:
+                    total_batches += 1
+                    temp_length = entry_length
+                else:
+                    temp_length += entry_length
+            
+            for entry in entries:
+                entry_text = entry['text']
+                entry_length = len(entry_text) + len(separator)
+                
+                # 如果添加当前条目会超过限制，先处理当前批次
+                if current_length + entry_length > max_chars and current_batch:
+                    batch_count += 1
+                    print(f"🎙️ Process {self.process_id}: Processing Google Translate batch {batch_count}/{total_batches} ({len(current_batch)} entries, {current_length} chars)")
+                    
+                    # 更新进度 (72% -> 80% 的范围内)
+                    progress = 72 + int((batch_count / total_batches) * 8)
+                    self.report_progress(min(80, progress))
+                    
+                    batch_results = self._translate_google_batch_multiprocess(current_batch, separator)
+                    translated_entries.extend(batch_results)
+                    
+                    # 重置批次
+                    current_batch = []
+                    current_length = 0
+                
+                current_batch.append(entry)
+                current_length += entry_length
+            
+            # 处理最后一批
+            if current_batch:
+                batch_count += 1
+                print(f"🎙️ Process {self.process_id}: Processing final Google Translate batch {batch_count}/{total_batches} ({len(current_batch)} entries, {current_length} chars)")
+                batch_results = self._translate_google_batch_multiprocess(current_batch, separator)
+                translated_entries.extend(batch_results)
+            
+            print(f"🎙️ Process {self.process_id}: Successfully translated {len(translated_entries)} entries via Google Translate in {batch_count} batches")
+            return translated_entries
+            
+        except Exception as e:
+            print(f"❌ Process {self.process_id}: Google Translate batch translation failed: {str(e)}")
+            raise
+    
+    def _translate_google_batch_multiprocess(self, entries, separator):
+        """多进程版本的Google批次翻译"""
+        # 提取所有需要翻译的文本
+        texts_to_translate = [entry['text'] for entry in entries]
+        
+        # 使用分隔符将所有文本合并成一个大字符串
+        combined_text = separator.join(texts_to_translate)
+        
+        # 使用Deep Translator进行批量翻译
+        from deep_translator import GoogleTranslator
+        translator = GoogleTranslator(source='auto', target='zh-CN')
+        translated_combined = translator.translate(combined_text)
+        
+        if not translated_combined:
+            raise ValueError("Empty response from Google Translate")
+        
+        # 分割翻译结果
+        translated_texts = translated_combined.split(separator)
+        
+        # 确保翻译结果数量匹配
+        if len(translated_texts) != len(entries):
+            print(f"⚠️ Process {self.process_id}: Translation count mismatch: expected {len(entries)}, got {len(translated_texts)}")
+            # 填充缺失的翻译
+            while len(translated_texts) < len(entries):
+                translated_texts.append("")
+            translated_texts = translated_texts[:len(entries)]
+        
+        # 构建翻译结果
+        batch_results = []
+        for i, entry in enumerate(entries):
+            translated_text = translated_texts[i].strip() if i < len(translated_texts) else ""
+            if not translated_text:
+                translated_text = entry['text']  # 如果翻译失败，使用原文
+            
+            batch_results.append({
+                'id': entry['id'],
+                'timestamp': entry['timestamp'],
+                'text': f"{entry['text']}\n{translated_text}"
+            })
+        
+        return batch_results
+    
+    def burn_subtitles(self, subtitle_path, output_path):
+        return VideoProcessor.burn_subtitles(self, subtitle_path, output_path)
+
+
+class MultiprocessVideoManager:
+    """多进程视频处理管理器"""
+    
+    def __init__(self, max_processes: Optional[int] = None):
+        self.processes = []
+        self.active_processes = {}  # 跟踪活动进程 {process_id: process_info}
+        self.pending_tasks = []  # 等待处理的任务队列
+        self.progress_queue = mp.Queue()
+        self.result_queue = mp.Queue()
+        self.is_processing = False
+        self.next_process_id = 0
+        
+        # 使用配置文件中的进程数，或者传入的参数
+        if max_processes is not None:
+            self.max_processes = max_processes
+        else:
+            # 从config导入进程数配置
+            self.max_processes = MAX_PROCESSES
+        
+        print(f"🔧 MultiprocessVideoManager initialized with max_processes={self.max_processes}")
+    
+    def _is_apple_silicon(self) -> bool:
+        """检测是否是Apple Silicon"""
+        if platform.system() != 'Darwin':
+            return False
+        try:
+            result = subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], 
+                                  capture_output=True, text=True, timeout=5)
+            return result.returncode == 0 and result.stdout.strip() == '1'
+        except Exception:
+            return False
+    
+    def start_processing(self, video_tasks: list):
+        """
+        开始多进程处理
+        
+        Args:
+            video_tasks: 视频任务列表，每个任务包含 (video_path, engine, api_settings, cache_dir)
+        """
+        if self.is_processing:
+            raise RuntimeError("已有处理任务在进行中")
+        
+        self.is_processing = True
+        self.processes = []
+    
+    def submit_video(self, video_path: str, engine: str, api_settings: Dict[str, Any], cache_dir: str) -> int:
+        """
+        提交单个视频进行处理
+        
+        Args:
+            video_path: 视频文件路径
+            engine: 翻译引擎
+            api_settings: API设置
+            cache_dir: 缓存目录
+            
+        Returns:
+            int: 进程ID（任务ID）
+        """
+        if not self.is_processing:
+            self.is_processing = True
+        
+        # 创建任务信息
+        task_info = {
+            'task_id': self.next_process_id,
+            'video_path': video_path,
+            'engine': engine,
+            'api_settings': api_settings,
+            'cache_dir': cache_dir,
+            'status': 'pending'  # pending, running, completed, failed
+        }
+        
+        self.next_process_id += 1
+        
+        # 将任务添加到待处理队列
+        self.pending_tasks.append(task_info)
+        print(f"📝 Added task {task_info['task_id']} for {os.path.basename(video_path)} to queue")
+        
+        # 尝试启动新任务
+        self._try_start_next_tasks()
+        
+        return task_info['task_id']
+    
+    def _try_start_next_tasks(self):
+        """尝试启动下一个任务（如果有空闲进程槽位）"""
+        # 清理已完成的进程
+        self._cleanup_finished_processes()
+        
+        # 检查是否有空闲槽位和待处理任务
+        while len(self.active_processes) < self.max_processes and self.pending_tasks:
+            task_info = self.pending_tasks.pop(0)  # 取出第一个任务
+            self._start_task(task_info)
+    
+    def _start_task(self, task_info: Dict[str, Any]):
+        """启动单个任务"""
+        process_id = task_info['task_id']
+        
+        # 创建并启动进程
+        process = mp.Process(
+            target=process_video_worker,
+            args=(
+                task_info['video_path'],
+                task_info['engine'],
+                task_info['api_settings'],
+                task_info['cache_dir'],
+                self.progress_queue,
+                self.result_queue,
+                process_id
+            )
+        )
+        process.start()
+        
+        # 更新任务状态
+        task_info['status'] = 'running'
+        task_info['process'] = process
+        task_info['completed'] = False
+        
+        # 保存进程信息
+        self.processes.append(task_info)
+        self.active_processes[process_id] = task_info
+        
+        print(f"🚀 Started process {process_id} for {os.path.basename(task_info['video_path'])} (active: {len(self.active_processes)}/{self.max_processes}, pending: {len(self.pending_tasks)})")
+    
+    def _cleanup_finished_processes(self):
+        """清理已完成的进程并启动新任务"""
+        finished_process_ids = []
+        
+        for process_id, proc_info in self.active_processes.items():
+            if not proc_info['process'].is_alive():
+                finished_process_ids.append(process_id)
+                # 确保进程正确结束
+                proc_info['process'].join(timeout=1)
+                proc_info['completed'] = True
+                proc_info['status'] = 'completed'
+                print(f"🧹 Cleaned up finished process {process_id} for {os.path.basename(proc_info['video_path'])}")
+        
+        # 从活动进程字典中移除已完成的进程
+        for process_id in finished_process_ids:
+            if process_id in self.active_processes:
+                del self.active_processes[process_id]
+    
+    def get_progress_updates(self) -> list:
+        """获取所有进度更新"""
+        # 首先清理已完成的进程并尝试启动新任务
+        self._cleanup_finished_processes()
+        self._try_start_next_tasks()
+        
+        updates = []
+        while True:
+            try:
+                update = self.progress_queue.get_nowait()
+                updates.append(update)
+            except queue.Empty:
+                break
+        return updates
+    
+    def get_results(self) -> list:
+        """获取所有完成的结果"""
+        results = []
+        while True:
+            try:
+                result = self.result_queue.get_nowait()
+                results.append(result)
+            except queue.Empty:
+                break
+        return results
+    
+    def is_all_complete(self) -> bool:
+        """检查所有任务是否完成（包括队列中的）"""
+        if not self.processes and not self.pending_tasks:
+            return True
+        
+        # 清理已完成的进程并尝试启动新任务
+        self._cleanup_finished_processes()
+        self._try_start_next_tasks()
+        
+        # 检查是否还有活动进程或待处理任务
+        return len(self.active_processes) == 0 and len(self.pending_tasks) == 0
+    
+    def process_videos(self, video_paths: List[str], engine: str, api_settings: Dict[str, Any], cache_dir: str) -> List[int]:
+        """
+        批量处理视频文件
+        
+        Args:
+            video_paths: 视频文件路径列表
+            engine: 翻译引擎
+            api_settings: API设置
+            cache_dir: 缓存目录
+            
+        Returns:
+            List[int]: 任务ID列表
+        """
+        if not video_paths:
+            return []
+        
+        task_ids = []
+        print(f"📋 Submitting {len(video_paths)} videos for processing (max concurrent: {self.max_processes})")
+        
+        for video_path in video_paths:
+            if os.path.exists(video_path):
+                task_id = self.submit_video(video_path, engine, api_settings, cache_dir)
+                task_ids.append(task_id)
+                print(f"   Added: {os.path.basename(video_path)} (Task ID: {task_id})")
+            else:
+                print(f"⚠️ Video file not found: {video_path}")
+        
+        print(f"📊 Queue Status: {len(self.active_processes)} running, {len(self.pending_tasks)} pending")
+        return task_ids
+    
+    def get_active_process_count(self) -> int:
+        """获取当前活动进程数量"""
+        self._cleanup_finished_processes()
+        return len(self.active_processes)
+    
+    def get_total_process_count(self) -> int:
+        """获取总进程数量（包括已完成的）"""
+        return len(self.processes)
+    
+    def stop_all(self):
+        """停止所有进程"""
+        print("🛑 Stopping all processes...")
+        
+        # 停止所有活动进程
+        for process_id, proc_info in self.active_processes.items():
+            if proc_info['process'].is_alive():
+                print(f"🛑 Terminating process {process_id}")
+                proc_info['process'].terminate()
+                proc_info['process'].join(timeout=5)
+                if proc_info['process'].is_alive():
+                    print(f"🛑 Force killing process {process_id}")
+                    proc_info['process'].kill()
+                proc_info['completed'] = True
+        
+        # 清空活动进程字典和待处理任务
+        self.active_processes.clear()
+        self.pending_tasks.clear()
+        self.is_processing = False
+        print(f"🛑 All processes stopped. Cleared {len(self.pending_tasks)} pending tasks.")
+    
+    def cleanup(self):
+        """清理资源"""
+        print("🧹 Cleaning up multiprocess manager...")
+        
+        self.stop_all()
+        
+        # 清空队列
+        while not self.progress_queue.empty():
+            try:
+                self.progress_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        while not self.result_queue.empty():
+            try:
+                self.result_queue.get_nowait()
+            except queue.Empty:
+                break
+        
+        print("🧹 Multiprocess manager cleanup completed")
 
 
 

@@ -1,34 +1,45 @@
 """
 语音识别模块 - 基于 Parakeet MLX
-从 check.py 提取核心功能，去除 CLI 相关内容
+支持多进程和多线程安全操作
 """
 import json
 import threading
+import os
+import math
+import tempfile
+import subprocess
 from typing import Any, Dict, Optional, Callable
 from mlx.core import bfloat16, float32
 from parakeet_mlx import AlignedResult, AlignedSentence, AlignedToken, from_pretrained
-
 from utils.logger import VideoLogger
 
 
 class SpeechRecognizer:
-    """语音识别类，封装 Parakeet MLX 模型 - 单例模式以避免多线程冲突"""
+    """语音识别类，封装 Parakeet MLX 模型 - 支持多进程和多线程安全"""
     
-    _instance = None
+    # 进程级别的实例字典，每个进程都有自己的实例
+    _instances = {}
     _lock = threading.Lock()
     _model_lock = threading.Lock()  # 模型访问锁
     
     def __new__(cls, *args, **kwargs):
-        """单例模式实现"""
-        if cls._instance is None:
+        """进程安全的单例模式实现 - 每个进程都有自己的实例"""
+        current_pid = os.getpid()
+        
+        if current_pid not in cls._instances:
             with cls._lock:
-                if cls._instance is None:
-                    print("🎙️ Creating new SpeechRecognizer singleton instance")
-                    cls._instance = super().__new__(cls)
-                    cls._instance._initialized = False
+                if current_pid not in cls._instances:
+                    print(f"🎙️ Creating new SpeechRecognizer instance for process {current_pid}")
+                    instance = super().__new__(cls)
+                    instance._initialized = False
+                    instance._process_id = current_pid
+                    cls._instances[current_pid] = instance
+                else:
+                    print(f"🎙️ Reusing SpeechRecognizer instance for process {current_pid}")
         else:
-            print("🎙️ Reusing existing SpeechRecognizer singleton instance")
-        return cls._instance
+            print(f"🎙️ Reusing existing SpeechRecognizer instance for process {current_pid}")
+            
+        return cls._instances[current_pid]
     
     def __init__(self, 
                  model_name: str = "mlx-community/parakeet-tdt-0.6b-v2",
@@ -40,7 +51,7 @@ class SpeechRecognizer:
                  progress_callback: Optional[Callable[[int, float, float, float], None]] = None,
                  status_callback: Optional[Callable[[str], None]] = None):
         """
-        初始化语音识别器（单例模式）
+        初始化语音识别器（进程安全的单例模式）
         
         Args:
             model_name: 模型名称
@@ -67,8 +78,10 @@ class SpeechRecognizer:
         self._model = None
         self._initialized = True
         
+        print(f"🎙️ SpeechRecognizer initialized for process {self._process_id}")
+        
     def _load_model(self):
-        """加载模型 - 线程安全版本"""
+        """加载模型 - 进程和线程安全版本"""
         # 双重检查锁定模式
         if self._model is not None:
             return
@@ -79,7 +92,7 @@ class SpeechRecognizer:
                 return
                 
             if self.logger:
-                self.logger.info(f"Loading model: {self.model_name}")
+                self.logger.info(f"Process {self._process_id}: Loading model: {self.model_name}")
                 
             # 检查模型是否需要下载（简单方式：检查缓存目录）
             needs_download = self._check_if_model_needs_download()
@@ -94,24 +107,30 @@ class SpeechRecognizer:
                 self.status_callback("Loading cached model...")
                 
             try:
-                # Parakeet MLX 会自动下载模型，但没有进度回调
-                # 我们提供一个简单的状态更新
+                # 使用新的 parakeet_mlx API
                 if needs_download and self.status_callback:
                     self.status_callback(f"Downloading {self.model_name}...")
                     
-                self._model = from_pretrained(
-                    self.model_name, 
-                    dtype=bfloat16 if not self.fp32 else float32
-                )
+                # 加载模型
+                self._model = from_pretrained(self.model_name)
                 
-                if self.local_attention:
-                    self._model.encoder.set_attention_model(
-                        "rel_pos_local_attn",
-                        (self.local_attention_context_size, self.local_attention_context_size),
+                # 注意：新版parakeet-mlx不再需要单独的processor参数
+                
+                # 配置模型参数
+                if hasattr(self._model, 'set_dtype'):
+                    dtype = float32 if self.fp32 else bfloat16
+                    self._model.set_dtype(dtype)
+                    print(f"🎙️ Process {self._process_id}: Model dtype set to {dtype}")
+                
+                if self.local_attention and hasattr(self._model, 'set_local_attention'):
+                    self._model.set_local_attention(
+                        enabled=True,
+                        context_size=self.local_attention_context_size
                     )
+                    print(f"🎙️ Process {self._process_id}: Local attention enabled with context size {self.local_attention_context_size}")
                     
                 if self.logger:
-                    self.logger.info("Model loaded successfully")
+                    self.logger.info(f"Process {self._process_id}: Model loaded successfully")
                     
                 if self.status_callback:
                     self.status_callback("Model loaded successfully!")
@@ -121,7 +140,7 @@ class SpeechRecognizer:
                     self.progress_callback(100, 0, 0, 0)  # 100% 完成
                         
             except Exception as e:
-                error_msg = f"Error loading model {self.model_name}: {e}"
+                error_msg = f"Process {self._process_id}: Error loading model {self.model_name}: {e}"
                 if self.logger:
                     self.logger.error(error_msg)
                 raise RuntimeError(error_msg)
@@ -154,7 +173,7 @@ class SpeechRecognizer:
                    overlap_duration: float = 15.0,
                    progress_callback: Optional[Callable[[int, int], None]] = None) -> AlignedResult:
         """
-        转录音频文件 - 线程安全版本
+        转录音频文件 - 支持分块处理和进程安全
         
         Args:
             audio_path: 音频文件路径
@@ -167,50 +186,260 @@ class SpeechRecognizer:
         """
         self._load_model()
         
+        if not os.path.exists(audio_path):
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        
         if self.logger:
-            self.logger.info(f"Starting transcription of: {audio_path}")
+            self.logger.info(f"Process {self._process_id}: Starting transcription of: {audio_path}")
             
         try:
             # 使用模型锁确保同一时间只有一个转录任务在运行
             if self.logger:
-                self.logger.info("Acquiring transcription lock...")
+                self.logger.info(f"Process {self._process_id}: Acquiring transcription lock...")
             
             with self._model_lock:
                 if self.logger:
-                    self.logger.info("Transcription lock acquired, starting transcription...")
+                    self.logger.info(f"Process {self._process_id}: Transcription lock acquired, starting transcription...")
                 
-                result = self._model.transcribe(
-                    audio_path,
-                    dtype=bfloat16 if not self.fp32 else float32,
-                    chunk_duration=chunk_duration,
-                    overlap_duration=overlap_duration,
-                    chunk_callback=progress_callback
-                )
+                # 如果没有指定分块时长或者音频较短，直接转录
+                if chunk_duration is None:
+                    result = self._transcribe_chunk(audio_path)
+                else:
+                    # 获取音频时长
+                    audio_duration = self._get_audio_duration(audio_path)
+                    
+                    if audio_duration <= chunk_duration:
+                        # 音频较短，直接处理
+                        if progress_callback:
+                            progress_callback(0, 1)
+                        
+                        result = self._transcribe_chunk(audio_path)
+                        
+                        if progress_callback:
+                            progress_callback(1, 1)
+                    else:
+                        # 音频较长，分块处理
+                        result = self._transcribe_with_chunks(
+                            audio_path, 
+                            audio_duration,
+                            chunk_duration, 
+                            overlap_duration, 
+                            progress_callback
+                        )
             
             if self.logger:
-                self.logger.info(f"Transcription completed for: {audio_path}")
+                self.logger.info(f"Process {self._process_id}: Transcription completed for: {audio_path}")
                 
             return result
             
         except Exception as e:
-            error_msg = f"Error transcribing file {audio_path}: {e}"
+            error_msg = f"Process {self._process_id}: Error transcribing file {audio_path}: {e}"
             if self.logger:
                 self.logger.error(error_msg)
             raise RuntimeError(error_msg)
     
+    def _get_audio_duration(self, audio_path: str) -> float:
+        """获取音频时长"""
+        try:
+            # 使用ffprobe获取音频时长
+            cmd = [
+                'ffprobe', '-v', 'quiet', '-show_entries', 'format=duration',
+                '-of', 'csv=p=0', audio_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                return float(result.stdout.strip())
+            else:
+                # 回退方案：假设时长
+                file_size = os.path.getsize(audio_path)
+                estimated_duration = file_size / (16000 * 2)  # 16kHz, 16-bit
+                print(f"⚠️ Process {self._process_id}: Could not get exact duration, estimating {estimated_duration:.2f}s")
+                return estimated_duration
+        except Exception:
+            # 默认时长
+            return 60.0
+    
+    def _transcribe_chunk(self, audio_path: str) -> AlignedResult:
+        """转录单个音频块"""
+        try:
+            # 使用模型处理音频 - 移除processor参数，因为新版API不支持
+            result = self._model.transcribe(audio_path)
+            return result
+        except Exception as e:
+            print(f"❌ Process {self._process_id}: Chunk transcription failed: {str(e)}")
+            # 返回空结果而不是抛出异常 - 使用正确的构造函数参数
+            return AlignedResult(sentences=[])
+    
+    def _transcribe_with_chunks(self, 
+                               audio_path: str,
+                               audio_duration: float,
+                               chunk_duration: float,
+                               overlap_duration: float,
+                               progress_callback: Optional[Callable[[int, int], None]] = None) -> AlignedResult:
+        """分块转录长音频"""
+        
+        # 计算分块参数
+        step_duration = chunk_duration - overlap_duration
+        total_chunks = max(1, math.ceil((audio_duration - overlap_duration) / step_duration))
+        
+        print(f"🎙️ Process {self._process_id}: Processing {total_chunks} chunks (chunk: {chunk_duration}s, overlap: {overlap_duration}s)")
+        
+        all_sentences = []
+        all_words = []
+        
+        for chunk_idx in range(total_chunks):
+            try:
+                # 计算当前块的时间范围
+                start_time = chunk_idx * step_duration
+                end_time = min(start_time + chunk_duration, audio_duration)
+                
+                print(f"🎙️ Process {self._process_id}: Processing chunk {chunk_idx + 1}/{total_chunks} ({start_time:.1f}s - {end_time:.1f}s)")
+                
+                # 提取音频块
+                chunk_path = self._extract_audio_chunk(audio_path, start_time, end_time)
+                
+                if chunk_path:
+                    # 转录音频块
+                    chunk_result = self._transcribe_chunk(chunk_path)
+                    
+                    # 调整时间戳并合并结果
+                    self._merge_chunk_result(
+                        chunk_result, 
+                        all_sentences, 
+                        all_words,
+                        start_time,
+                        overlap_duration if chunk_idx > 0 else 0.0
+                    )
+                    
+                    # 清理临时文件
+                    try:
+                        os.unlink(chunk_path)
+                    except Exception:
+                        pass
+                
+                # 报告进度
+                if progress_callback:
+                    progress_callback(chunk_idx + 1, total_chunks)
+                    
+            except Exception as e:
+                print(f"⚠️ Process {self._process_id}: Failed to process chunk {chunk_idx + 1}: {str(e)}")
+                continue
+        
+        # 创建最终结果 - 使用正确的构造函数参数
+        final_result = AlignedResult(sentences=all_sentences)
+        print(f"🎙️ Process {self._process_id}: Transcription completed: {len(all_sentences)} sentences, {len(all_words)} words")
+        
+        return final_result
+    
+    def _extract_audio_chunk(self, audio_path: str, start_time: float, end_time: float) -> Optional[str]:
+        """提取音频块"""
+        try:
+            # 创建临时文件
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+                chunk_path = tmp_file.name
+            
+            # 使用ffmpeg提取音频块
+            cmd = [
+                'ffmpeg', '-y', '-i', audio_path,
+                '-ss', str(start_time),
+                '-t', str(end_time - start_time),
+                '-ac', '1', '-ar', '16000',
+                chunk_path
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            if result.returncode == 0 and os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
+                return chunk_path
+            else:
+                print(f"⚠️ Process {self._process_id}: Failed to extract audio chunk: {result.stderr}")
+                try:
+                    os.unlink(chunk_path)
+                except Exception:
+                    pass
+                return None
+                
+        except Exception as e:
+            print(f"⚠️ Process {self._process_id}: Audio chunk extraction error: {str(e)}")
+            return None
+    
+    def _merge_chunk_result(self, 
+                           chunk_result: AlignedResult,
+                           all_sentences: list,
+                           all_words: list,
+                           time_offset: float,
+                           overlap_duration: float):
+        """合并块结果到总结果中"""
+        if not chunk_result or not chunk_result.sentences:
+            return
+        
+        # 处理句子
+        for sentence in chunk_result.sentences:
+            # 调整时间戳
+            adjusted_sentence = AlignedSentence(
+                text=sentence.text,
+                start=sentence.start + time_offset,
+                end=sentence.end + time_offset,
+                words=[]
+            )
+            
+            # 处理句子中的词（如果有的话）
+            if hasattr(sentence, 'words') and sentence.words:
+                for word in sentence.words:
+                    adjusted_word = AlignedToken(
+                        text=word.text,
+                        start=word.start + time_offset,
+                        end=word.end + time_offset
+                    )
+                    adjusted_sentence.words.append(adjusted_word)
+                    all_words.append(adjusted_word)
+            elif hasattr(sentence, 'tokens') and sentence.tokens:
+                # 兼容 tokens 字段
+                for token in sentence.tokens:
+                    adjusted_token = AlignedToken(
+                        text=token.text,
+                        start=token.start + time_offset,
+                        end=token.end + time_offset
+                    )
+                    adjusted_sentence.words.append(adjusted_token)
+                    all_words.append(adjusted_token)
+            
+            # 跳过重叠部分的内容（除了第一个块）
+            if time_offset == 0 or adjusted_sentence.start >= time_offset + overlap_duration:
+                all_sentences.append(adjusted_sentence)
+
     @classmethod
     def cleanup_singleton(cls):
-        """清理单例实例 - 用于应用程序退出时"""
+        """清理单例实例 - 用于应用程序退出时，支持多进程"""
+        current_pid = os.getpid()
         with cls._lock:
-            if cls._instance is not None:
+            if current_pid in cls._instances:
                 try:
-                    if hasattr(cls._instance, '_model') and cls._instance._model is not None:
+                    instance = cls._instances[current_pid]
+                    if hasattr(instance, '_model') and instance._model is not None:
                         # MLX 模型会自动清理，我们只需要将引用设为None
-                        cls._instance._model = None
+                        instance._model = None
+                        instance._processor = None
+                    print(f"🎙️ Cleaned up SpeechRecognizer for process {current_pid}")
                 except Exception as e:
-                    print(f"Error cleaning up SpeechRecognizer singleton: {e}")
+                    print(f"Error cleaning up SpeechRecognizer for process {current_pid}: {e}")
                 finally:
-                    cls._instance = None
+                    del cls._instances[current_pid]
+    
+    @classmethod
+    def cleanup_all_instances(cls):
+        """清理所有进程的实例 - 用于完全退出应用程序时"""
+        with cls._lock:
+            for pid, instance in list(cls._instances.items()):
+                try:
+                    if hasattr(instance, '_model') and instance._model is not None:
+                        instance._model = None
+                        instance._processor = None
+                    print(f"🎙️ Cleaned up SpeechRecognizer for process {pid}")
+                except Exception as e:
+                    print(f"Error cleaning up SpeechRecognizer for process {pid}: {e}")
+            cls._instances.clear()
+            print("🎙️ All SpeechRecognizer instances cleaned up")
 
 
 class SubtitleFormatter:
@@ -253,6 +482,10 @@ class SubtitleFormatter:
         Returns:
             str: SRT格式字幕内容
         """
+        # 处理空结果
+        if not result or not result.sentences:
+            return ""
+            
         srt_content = []
         entry_index = 1
         
@@ -380,11 +613,15 @@ class SubtitleFormatter:
         Returns:
             str: JSON格式内容
         """
+        # 处理空结果
+        if not result:
+            return json.dumps({"sentences": [], "words": []}, ensure_ascii=False, indent=2)
+            
         output_dict = {
-            "text": result.text,
+            "text": result.text if hasattr(result, 'text') else "",
             "sentences": [
                 SubtitleFormatter._aligned_sentence_to_dict(sentence) 
-                for sentence in result.sentences
+                for sentence in (result.sentences if result.sentences else [])
             ],
         }
         return json.dumps(output_dict, indent=2, ensure_ascii=False)
