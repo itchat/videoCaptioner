@@ -1049,7 +1049,7 @@ class VideoProcessor(QRunnable):
                 "-vf", f"subtitles='{subtitle_path}':force_style='FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=4'",
                 "-c:v", "h264_videotoolbox",
                 "-b:v", "0",  # 使用变动比特率模式
-                "-q:v", "50", # VideoToolbox质量参数调整为55，更激进的压缩
+                "-q:v", "23", # VideoToolbox质量参数调整为55，更激进的压缩
                 "-c:a", "copy",
                 "-movflags", "+faststart",  # 优化在线播放
                 output_path,
@@ -1739,7 +1739,7 @@ class VideoProcessorForMultiprocess:
         try:
             # 使用不会被翻译的特殊Unicode分隔符
             separator = "\n🔸🔸🔸\n"  # 使用特殊符号，Google Translate不会翻译
-            max_chars = 4500  # 留一些余量，避免超过5000字符限制
+            max_chars = OPENAI_MAX_CHARS_PER_BATCH # 留一些余量，避免超过5000字符限制
             translated_entries = []
             
             # 分批处理字幕条目
