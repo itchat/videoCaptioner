@@ -95,66 +95,86 @@ class SpeechRecognizer:
                 self.logger.info(f"Process {self._process_id}: Loading model: {self.model_name}")
                 
             try:
-                # 使用文件锁防止进程间重复下载
+                # 使用文件锁防止进程间重复下载（仅在支持的平台上）
                 import tempfile
-                import fcntl
+                try:
+                    import fcntl
+                    fcntl_available = True
+                except ImportError:
+                    fcntl_available = False
+                    print(f"⚠️ Process {self._process_id}: fcntl not available on this platform, skipping file locking")
                 
                 lock_file_path = os.path.join(tempfile.gettempdir(), f"parakeet_download_{self.model_name.replace('/', '_')}.lock")
                 
-                try:
-                    # 创建进程间锁文件
-                    with open(lock_file_path, 'w') as lock_file:
-                        try:
-                            # 尝试获取独占锁
-                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                            print(f"🔒 Process {self._process_id}: Acquired download lock")
-                            
-                            # 再次检查模型是否需要下载（在锁内重新检查）
-                            needs_download = self._check_if_model_needs_download()
-                            
-                            # 只有在需要下载时才通知UI显示下载对话框
-                            if needs_download and self.download_callback:
-                                self.download_callback(self.model_name)
+                if fcntl_available:
+                    try:
+                        # 创建进程间锁文件
+                        with open(lock_file_path, 'w') as lock_file:
+                            try:
+                                # 尝试获取独占锁
+                                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                print(f"🔒 Process {self._process_id}: Acquired download lock")
                                 
-                            if needs_download and self.status_callback:
-                                self.status_callback("Initializing model download...")
-                            elif self.status_callback:
-                                self.status_callback("Loading cached model...")
+                                # 再次检查模型是否需要下载（在锁内重新检查）
+                                needs_download = self._check_if_model_needs_download()
                                 
-                            # 使用新的 parakeet_mlx API
-                            if needs_download and self.status_callback:
-                                self.status_callback(f"Downloading {self.model_name}...")
+                                # 只有在需要下载时才通知UI显示下载对话框
+                                if needs_download and self.download_callback:
+                                    self.download_callback(self.model_name)
+                                    
+                                if needs_download and self.status_callback:
+                                    self.status_callback("Initializing model download...")
+                                elif self.status_callback:
+                                    self.status_callback("Loading cached model...")
+                                    
+                                # 使用新的 parakeet_mlx API
+                                if needs_download and self.status_callback:
+                                    self.status_callback(f"Downloading {self.model_name}...")
+                                    
+                                # 加载模型
+                                print(f"📥 Process {self._process_id}: Loading model from {'cache' if not needs_download else 'download'}")
+                                self._model = from_pretrained(self.model_name)
                                 
-                            # 加载模型
-                            print(f"📥 Process {self._process_id}: Loading model from {'cache' if not needs_download else 'download'}")
-                            self._model = from_pretrained(self.model_name)
-                            
-                            # 释放锁（函数结束时自动释放）
-                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                            print(f"🔓 Process {self._process_id}: Released download lock")
-                            
-                        except IOError:
-                            # 无法获取锁，说明其他进程正在下载
-                            print(f"⏳ Process {self._process_id}: Another process is downloading, waiting...")
-                            if self.status_callback:
-                                self.status_callback("Another process is downloading the model, please wait...")
-                            
-                            # 阻塞等待锁（其他进程下载完成）
-                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                            print(f"✅ Process {self._process_id}: Download completed by other process, loading cached model")
-                            
-                            if self.status_callback:
-                                self.status_callback("Loading cached model...")
+                                # 释放锁（函数结束时自动释放）
+                                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                                print(f"🔓 Process {self._process_id}: Released download lock")
                                 
-                            # 直接加载已缓存的模型
-                            self._model = from_pretrained(self.model_name)
+                            except IOError:
+                                # 无法获取锁，说明其他进程正在下载
+                                print(f"⏳ Process {self._process_id}: Another process is downloading, waiting...")
+                                if self.status_callback:
+                                    self.status_callback("Another process is downloading the model, please wait...")
+                                
+                                # 阻塞等待锁（其他进程下载完成）
+                                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                                print(f"✅ Process {self._process_id}: Download completed by other process, loading cached model")
+                                
+                                if self.status_callback:
+                                    self.status_callback("Loading cached model...")
+                                    
+                                # 直接加载已缓存的模型
+                                self._model = from_pretrained(self.model_name)
+                                
+                                # 释放锁
+                                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                                
+                    except Exception as e:
+                        print(f"⚠️ Process {self._process_id}: File lock failed, falling back to direct loading: {e}")
+                        # 文件锁失败时的备用方案
+                        needs_download = self._check_if_model_needs_download()
+                        
+                        if needs_download and self.download_callback:
+                            self.download_callback(self.model_name)
                             
-                            # 释放锁
-                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                        if needs_download and self.status_callback:
+                            self.status_callback("Initializing model download...")
+                        elif self.status_callback:
+                            self.status_callback("Loading cached model...")
                             
-                except Exception as e:
-                    print(f"⚠️ Process {self._process_id}: File lock failed, falling back to direct loading: {e}")
-                    # 文件锁失败时的备用方案
+                        self._model = from_pretrained(self.model_name)
+                else:
+                    # fcntl不可用，直接加载模型
+                    print(f"📥 Process {self._process_id}: Loading model directly (no file locking)")
                     needs_download = self._check_if_model_needs_download()
                     
                     if needs_download and self.download_callback:
@@ -168,17 +188,27 @@ class SpeechRecognizer:
                     self._model = from_pretrained(self.model_name)
                     
                 # 配置模型参数
-                if hasattr(self._model, 'set_dtype'):
-                    dtype = float32 if self.fp32 else bfloat16
-                    self._model.set_dtype(dtype)
-                    print(f"🎙️ Process {self._process_id}: Model dtype set to {dtype}")
+                try:
+                    if hasattr(self._model, 'set_dtype'):
+                        dtype = float32 if self.fp32 else bfloat16
+                        self._model.set_dtype(dtype)
+                        print(f"🎙️ Process {self._process_id}: Model dtype set to {dtype}")
+                    else:
+                        print(f"🎙️ Process {self._process_id}: Model does not support set_dtype method")
+                except Exception as e:
+                    print(f"⚠️ Process {self._process_id}: Failed to set model dtype: {e}")
                 
-                if self.local_attention and hasattr(self._model, 'set_local_attention'):
-                    self._model.set_local_attention(
-                        enabled=True,
-                        context_size=self.local_attention_context_size
-                    )
-                    print(f"🎙️ Process {self._process_id}: Local attention enabled with context size {self.local_attention_context_size}")
+                try:
+                    if self.local_attention and hasattr(self._model, 'set_local_attention'):
+                        self._model.set_local_attention(
+                            enabled=True,
+                            context_size=self.local_attention_context_size
+                        )
+                        print(f"🎙️ Process {self._process_id}: Local attention enabled with context size {self.local_attention_context_size}")
+                    else:
+                        print(f"🎙️ Process {self._process_id}: Model does not support set_local_attention method")
+                except Exception as e:
+                    print(f"⚠️ Process {self._process_id}: Failed to set local attention: {e}")
                     
                 if self.logger:
                     self.logger.info(f"Process {self._process_id}: Model loaded successfully")
@@ -354,7 +384,7 @@ class SpeechRecognizer:
         except Exception as e:
             print(f"❌ Process {self._process_id}: Chunk transcription failed: {str(e)}")
             # 返回空结果而不是抛出异常 - 使用正确的构造函数参数
-            return AlignedResult(sentences=[])
+            return AlignedResult(text="", sentences=[])
     
     def _transcribe_with_chunks(self, 
                                audio_path: str,
@@ -391,8 +421,7 @@ class SpeechRecognizer:
                     # 调整时间戳并合并结果
                     self._merge_chunk_result(
                         chunk_result, 
-                        all_sentences, 
-                        all_words,
+                        all_sentences,
                         start_time,
                         overlap_duration if chunk_idx > 0 else 0.0
                     )
@@ -412,8 +441,10 @@ class SpeechRecognizer:
                 continue
         
         # 创建最终结果 - 使用正确的构造函数参数
-        final_result = AlignedResult(sentences=all_sentences)
-        print(f"🎙️ Process {self._process_id}: Transcription completed: {len(all_sentences)} sentences, {len(all_words)} words")
+        # 合并所有句子的文本
+        combined_text = " ".join(sentence.text for sentence in all_sentences)
+        final_result = AlignedResult(text=combined_text, sentences=all_sentences)
+        print(f"🎙️ Process {self._process_id}: Transcription completed: {len(all_sentences)} sentences")
         
         return final_result
     
@@ -452,7 +483,6 @@ class SpeechRecognizer:
     def _merge_chunk_result(self, 
                            chunk_result: AlignedResult,
                            all_sentences: list,
-                           all_words: list,
                            time_offset: float,
                            overlap_duration: float):
         """合并块结果到总结果中"""
@@ -461,34 +491,37 @@ class SpeechRecognizer:
         
         # 处理句子
         for sentence in chunk_result.sentences:
-            # 调整时间戳
-            adjusted_sentence = AlignedSentence(
-                text=sentence.text,
-                start=sentence.start + time_offset,
-                end=sentence.end + time_offset,
-                words=[]
-            )
-            
             # 处理句子中的词（如果有的话）
+            adjusted_tokens = []
             if hasattr(sentence, 'words') and sentence.words:
                 for word in sentence.words:
                     adjusted_word = AlignedToken(
                         text=word.text,
                         start=word.start + time_offset,
-                        end=word.end + time_offset
+                        end=word.end + time_offset,
+                        id=getattr(word, 'id', 0),
+                        duration=(word.end + time_offset) - (word.start + time_offset)
                     )
-                    adjusted_sentence.words.append(adjusted_word)
-                    all_words.append(adjusted_word)
+                    adjusted_tokens.append(adjusted_word)
             elif hasattr(sentence, 'tokens') and sentence.tokens:
                 # 兼容 tokens 字段
                 for token in sentence.tokens:
                     adjusted_token = AlignedToken(
                         text=token.text,
                         start=token.start + time_offset,
-                        end=token.end + time_offset
+                        end=token.end + time_offset,
+                        id=getattr(token, 'id', 0),
+                        duration=(token.end + time_offset) - (token.start + time_offset)
                     )
-                    adjusted_sentence.words.append(adjusted_token)
-                    all_words.append(adjusted_token)
+                    adjusted_tokens.append(adjusted_token)
+            
+            # 调整时间戳 - 传入tokens参数
+            adjusted_sentence = AlignedSentence(
+                text=sentence.text,
+                start=sentence.start + time_offset,
+                end=sentence.end + time_offset,
+                tokens=adjusted_tokens
+            )
             
             # 跳过重叠部分的内容（除了第一个块）
             if time_offset == 0 or adjusted_sentence.start >= time_offset + overlap_duration:
@@ -505,7 +538,6 @@ class SpeechRecognizer:
                     if hasattr(instance, '_model') and instance._model is not None:
                         # MLX 模型会自动清理，我们只需要将引用设为None
                         instance._model = None
-                        instance._processor = None
                     print(f"🎙️ Cleaned up SpeechRecognizer for process {current_pid}")
                 except Exception as e:
                     print(f"Error cleaning up SpeechRecognizer for process {current_pid}: {e}")
@@ -520,7 +552,6 @@ class SpeechRecognizer:
                 try:
                     if hasattr(instance, '_model') and instance._model is not None:
                         instance._model = None
-                        instance._processor = None
                     print(f"🎙️ Cleaned up SpeechRecognizer for process {pid}")
                 except Exception as e:
                     print(f"Error cleaning up SpeechRecognizer for process {pid}: {e}")
@@ -577,25 +608,38 @@ class SubtitleFormatter:
         
         if highlight_words:
             for sentence in result.sentences:
-                for i, token in enumerate(sentence.tokens):
-                    start_time = SubtitleFormatter.format_timestamp(token.start, decimal_marker=",")
-                    end_time = SubtitleFormatter.format_timestamp(
-                        token.end
-                        if token == sentence.tokens[-1]
-                        else sentence.tokens[i + 1].start,
-                        decimal_marker=",",
-                    )
+                # 检查句子是否有tokens属性
+                if hasattr(sentence, 'tokens') and sentence.tokens:
+                    for i, token in enumerate(sentence.tokens):
+                        start_time = SubtitleFormatter.format_timestamp(token.start, decimal_marker=",")
+                        end_time = SubtitleFormatter.format_timestamp(
+                            token.end
+                            if token == sentence.tokens[-1]
+                            else sentence.tokens[i + 1].start,
+                            decimal_marker=",",
+                        )
 
-                    text = ""
-                    for j, inner_token in enumerate(sentence.tokens):
-                        if i == j:
-                            text += inner_token.text.replace(
-                                inner_token.text.strip(),
-                                f"<u>{inner_token.text.strip()}</u>",
-                            )
-                        else:
-                            text += inner_token.text
-                    text = text.strip()
+                        text = ""
+                        for j, inner_token in enumerate(sentence.tokens):
+                            if i == j:
+                                text += inner_token.text.replace(
+                                    inner_token.text.strip(),
+                                    f"<u>{inner_token.text.strip()}</u>",
+                                )
+                            else:
+                                text += inner_token.text
+                        text = text.strip()
+
+                        srt_content.append(f"{entry_index}")
+                        srt_content.append(f"{start_time} --> {end_time}")
+                        srt_content.append(text)
+                        srt_content.append("")
+                        entry_index += 1
+                else:
+                    # 如果没有tokens，直接使用句子级别的时间戳
+                    start_time = SubtitleFormatter.format_timestamp(sentence.start, decimal_marker=",")
+                    end_time = SubtitleFormatter.format_timestamp(sentence.end, decimal_marker=",")
+                    text = sentence.text.strip()
 
                     srt_content.append(f"{entry_index}")
                     srt_content.append(f"{start_time} --> {end_time}")
@@ -632,25 +676,36 @@ class SubtitleFormatter:
         
         if highlight_words:
             for sentence in result.sentences:
-                for i, token in enumerate(sentence.tokens):
-                    start_time = SubtitleFormatter.format_timestamp(token.start, decimal_marker=".")
-                    end_time = SubtitleFormatter.format_timestamp(
-                        token.end
-                        if token == sentence.tokens[-1]
-                        else sentence.tokens[i + 1].start,
-                        decimal_marker=".",
-                    )
+                # 检查句子是否有tokens属性
+                if hasattr(sentence, 'tokens') and sentence.tokens:
+                    for i, token in enumerate(sentence.tokens):
+                        start_time = SubtitleFormatter.format_timestamp(token.start, decimal_marker=".")
+                        end_time = SubtitleFormatter.format_timestamp(
+                            token.end
+                            if token == sentence.tokens[-1]
+                            else sentence.tokens[i + 1].start,
+                            decimal_marker=".",
+                        )
 
-                    text_line = ""
-                    for j, inner_token in enumerate(sentence.tokens):
-                        if i == j:
-                            text_line += inner_token.text.replace(
-                                inner_token.text.strip(),
-                                f"<b>{inner_token.text.strip()}</b>",
-                            )
-                        else:
-                            text_line += inner_token.text
-                    text_line = text_line.strip()
+                        text_line = ""
+                        for j, inner_token in enumerate(sentence.tokens):
+                            if i == j:
+                                text_line += inner_token.text.replace(
+                                    inner_token.text.strip(),
+                                    f"<b>{inner_token.text.strip()}</b>",
+                                )
+                            else:
+                                text_line += inner_token.text
+                        text_line = text_line.strip()
+
+                        vtt_content.append(f"{start_time} --> {end_time}")
+                        vtt_content.append(text_line)
+                        vtt_content.append("")
+                else:
+                    # 如果没有tokens，直接使用句子级别的时间戳
+                    start_time = SubtitleFormatter.format_timestamp(sentence.start, decimal_marker=".")
+                    end_time = SubtitleFormatter.format_timestamp(sentence.end, decimal_marker=".")
+                    text_line = sentence.text.strip()
 
                     vtt_content.append(f"{start_time} --> {end_time}")
                     vtt_content.append(text_line)
@@ -674,18 +729,22 @@ class SubtitleFormatter:
             "text": token.text,
             "start": round(token.start, 3),
             "end": round(token.end, 3),
-            "duration": round(token.duration, 3),
+            "duration": round(getattr(token, 'duration', token.end - token.start), 3),
         }
 
     @staticmethod
     def _aligned_sentence_to_dict(sentence: AlignedSentence) -> Dict[str, Any]:
         """将对齐的句子转换为字典"""
+        tokens_list = []
+        if hasattr(sentence, 'tokens') and sentence.tokens:
+            tokens_list = [SubtitleFormatter._aligned_token_to_dict(token) for token in sentence.tokens]
+        
         return {
             "text": sentence.text,
             "start": round(sentence.start, 3),
             "end": round(sentence.end, 3),
-            "duration": round(sentence.duration, 3),
-            "tokens": [SubtitleFormatter._aligned_token_to_dict(token) for token in sentence.tokens],
+            "duration": round(getattr(sentence, 'duration', sentence.end - sentence.start), 3),
+            "tokens": tokens_list,
         }
 
     @staticmethod

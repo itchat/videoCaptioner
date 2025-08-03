@@ -15,6 +15,7 @@ import json
 import platform
 import multiprocessing as mp
 import queue
+import random
 from typing import Dict, Any, Optional, List
 from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES
 
@@ -22,6 +23,85 @@ from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATC
 class ContentFilteredException(Exception):
     """Exception raised when content is filtered by OpenAI safety system"""
     pass
+
+
+class RetryableAPIException(Exception):
+    """Exception for API errors that can be retried"""
+    pass
+
+
+def exponential_backoff_retry(func, max_retries=None, base_delay=None, max_delay=None, 
+                             retryable_status_codes={429, 500, 502, 503, 504}):
+    """
+    通用的指数退避重试装饰器函数
+    
+    Args:
+        func: 要重试的函数
+        max_retries: 最大重试次数（None则使用配置文件设置）
+        base_delay: 基础延迟时间（秒）（None则使用配置文件设置）
+        max_delay: 最大延迟时间（秒）（None则使用配置文件设置）
+        retryable_status_codes: 可重试的HTTP状态码
+    """
+    def wrapper(*args, **kwargs):
+        # 从配置文件获取重试参数
+        try:
+            from config import MAX_RETRIES, RETRY_BASE_DELAY, RETRY_MAX_DELAY
+            actual_max_retries = max_retries if max_retries is not None else MAX_RETRIES
+            actual_base_delay = base_delay if base_delay is not None else RETRY_BASE_DELAY
+            actual_max_delay = max_delay if max_delay is not None else RETRY_MAX_DELAY
+        except ImportError:
+            # 如果无法导入配置，使用默认值
+            actual_max_retries = max_retries if max_retries is not None else 3
+            actual_base_delay = base_delay if base_delay is not None else 1.0
+            actual_max_delay = max_delay if max_delay is not None else 60.0
+        
+        last_exception = None
+        
+        for attempt in range(actual_max_retries + 1):  # +1 because first attempt is not a retry
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                last_exception = e
+                
+                # 如果这是最后一次尝试，直接抛出异常
+                if attempt == actual_max_retries:
+                    break
+                
+                # 检查是否应该重试
+                should_retry = False
+                if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                    if e.response.status_code in retryable_status_codes:
+                        should_retry = True
+                elif isinstance(e, (requests.exceptions.Timeout, 
+                                  requests.exceptions.ConnectionError,
+                                  requests.exceptions.RequestException)):
+                    should_retry = True
+                elif "rate limit" in str(e).lower() or "too many requests" in str(e).lower():
+                    should_retry = True
+                elif isinstance(e, RetryableAPIException):
+                    should_retry = True
+                
+                if not should_retry:
+                    # 对于400错误（如content filter），不重试
+                    if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+                        if e.response.status_code == 400:
+                            break
+                    # 对于其他不可重试的错误，直接抛出
+                    break
+                
+                # 计算延迟时间（指数退避 + 随机抖动）
+                delay = min(actual_base_delay * (2 ** attempt), actual_max_delay)
+                jitter = random.uniform(0.1, 0.3) * delay  # 添加10-30%的随机抖动
+                total_delay = delay + jitter
+                
+                print(f"⏳ Retry attempt {attempt + 1}/{actual_max_retries} after error: {str(e)[:100]}...")
+                print(f"⏳ Waiting {total_delay:.1f}s before retry...")
+                time.sleep(total_delay)
+        
+        # 所有重试都失败了
+        raise last_exception
+    
+    return wrapper
 
 
 class VideoProcessor(QRunnable):
@@ -550,7 +630,33 @@ class VideoProcessor(QRunnable):
             raise
     
     def _translate_openai_batch(self, entries):
-        """OpenAI单批次翻译 - 使用段落分隔符方案"""
+        """OpenAI单批次翻译 - 使用段落分隔符方案 - 带重试机制"""
+        @exponential_backoff_retry
+        def _make_api_request():
+            """实际的API请求函数，支持重试"""
+            response = self.session.post(
+                f"{self.api_settings['base_url']}/v1/chat/completions",
+                json=data,
+                timeout=300
+            )
+            
+            # 检查HTTP状态码
+            if response.status_code != 200:
+                error_text = response.text
+                if response.status_code == 400:
+                    # 400错误通常不应该重试，但我们检查具体原因
+                    if "content_filter" in error_text.lower() or "content management policy" in error_text.lower():
+                        raise ContentFilteredException(f"Content filtered by OpenAI: {error_text}")
+                    else:
+                        raise requests.exceptions.RequestException(f"OpenAI API error: {response.status_code} - {error_text}")
+                elif response.status_code in {429, 500, 502, 503, 504}:
+                    # 这些状态码可以重试
+                    raise RetryableAPIException(f"OpenAI API error: {response.status_code} - {error_text}")
+                else:
+                    raise requests.exceptions.RequestException(f"OpenAI API error: {response.status_code} - {error_text}")
+            
+            return response.json()
+
         # 构建翻译文本 - 使用 %% 分隔符
         if len(entries) == 1:
             # 单段落，直接翻译
@@ -575,14 +681,10 @@ class VideoProcessor(QRunnable):
             "max_tokens": 8000  # 适中的token限制
         }
 
-        response = self.session.post(
-            f"{self.api_settings['base_url']}/v1/chat/completions",
-            json=data,
-            timeout=300
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
+        try:
+            # 使用重试机制进行API请求
+            result = _make_api_request()
+            
             if 'choices' not in result or not result['choices']:
                 raise ValueError(f"Invalid API response structure: {result}")
             
@@ -634,9 +736,78 @@ class VideoProcessor(QRunnable):
             
             self.logger.info(f"Successfully translated {len(translated_entries)} entries via OpenAI paragraph batch")
             return translated_entries
-                
-        else:
-            raise requests.exceptions.RequestException(f"OpenAI API error: {response.status_code} - {response.text}")
+            
+        except ContentFilteredException as e:
+            self.logger.warning(f"Content filtered by OpenAI safety system: {str(e)}")
+            # 检查是否启用 Google 降级
+            try:
+                from config import ENABLE_GOOGLE_FALLBACK
+                google_fallback_enabled = ENABLE_GOOGLE_FALLBACK
+            except ImportError:
+                google_fallback_enabled = True  # 默认启用
+            
+            if google_fallback_enabled:
+                # 对于内容过滤，尝试使用 Google Translate 作为降级方案
+                self.logger.info("Falling back to Google Translate for filtered content...")
+                try:
+                    return self._translate_google_batch(entries, "\n🔸🔸🔸\n")
+                except Exception as google_error:
+                    self.logger.error(f"Google Translate fallback also failed: {str(google_error)}")
+                    # 如果 Google 翻译也失败，返回原文但标记为已处理
+                    fallback_entries = []
+                    for entry in entries:
+                        fallback_entries.append({
+                            'id': entry['id'],
+                            'timestamp': entry['timestamp'],
+                            'text': f"{entry['text']}\n[Translation failed - showing original]"
+                        })
+                    return fallback_entries
+            else:
+                # 如果没有启用 Google 降级，直接返回原文
+                fallback_entries = []
+                for entry in entries:
+                    fallback_entries.append({
+                        'id': entry['id'],
+                        'timestamp': entry['timestamp'],
+                        'text': f"{entry['text']}\n[Content filtered - showing original]"
+                    })
+                return fallback_entries
+            
+        except Exception as e:
+            self.logger.error(f"OpenAI translation failed after retries: {str(e)}")
+            # 检查是否启用 Google 降级
+            try:
+                from config import ENABLE_GOOGLE_FALLBACK
+                google_fallback_enabled = ENABLE_GOOGLE_FALLBACK
+            except ImportError:
+                google_fallback_enabled = True  # 默认启用
+            
+            if google_fallback_enabled:
+                # 对于其他错误，尝试使用 Google Translate 作为降级方案
+                self.logger.info("Falling back to Google Translate after OpenAI failure...")
+                try:
+                    return self._translate_google_batch(entries, "\n🔸🔸🔸\n")
+                except Exception as google_error:
+                    self.logger.error(f"Google Translate fallback also failed: {str(google_error)}")
+                    # 如果 Google 翻译也失败，返回原文
+                    fallback_entries = []
+                    for entry in entries:
+                        fallback_entries.append({
+                            'id': entry['id'],
+                            'timestamp': entry['timestamp'],
+                            'text': entry['text']  # 保持原文
+                        })
+                    return fallback_entries
+            else:
+                # 如果没有启用 Google 降级，直接返回原文
+                fallback_entries = []
+                for entry in entries:
+                    fallback_entries.append({
+                        'id': entry['id'],
+                        'timestamp': entry['timestamp'],
+                        'text': entry['text']  # 保持原文
+                    })
+                return fallback_entries
     
     def _translate_openai_multiple_batches(self, entries, max_chars=None, max_entries=None):
         """OpenAI多批次翻译 - 使用段落分隔符方案"""
@@ -706,7 +877,8 @@ class VideoProcessor(QRunnable):
     def _batch_translate_with_google(self, entries):
         """使用Google Translate批量翻译所有字幕，支持分批处理大文本"""
         try:
-            separator = "\n---SUBTITLE_SEPARATOR---\n"
+            # 使用不会被翻译的特殊Unicode分隔符
+            separator = "\n🔸🔸🔸\n"  # 使用特殊符号，Google Translate不会翻译
             max_chars = 4500  # 留一些余量，避免超过5000字符限制
             translated_entries = []
             
@@ -764,7 +936,7 @@ class VideoProcessor(QRunnable):
             raise
     
     def _translate_google_batch(self, entries, separator):
-        """翻译一个批次的字幕条目"""
+        """翻译一个批次的字幕条目 - 改进的分隔符处理"""
         # 提取所有需要翻译的文本
         texts_to_translate = [entry['text'] for entry in entries]
         
@@ -772,22 +944,61 @@ class VideoProcessor(QRunnable):
         combined_text = separator.join(texts_to_translate)
         
         # 使用Deep Translator进行批量翻译
+        from deep_translator import GoogleTranslator
         translator = GoogleTranslator(source='auto', target='zh-CN')
         translated_combined = translator.translate(combined_text)
         
         if not translated_combined:
             raise ValueError("Empty response from Google Translate")
         
-        # 分割翻译结果
+        # 尝试按分隔符分割翻译结果
         translated_texts = translated_combined.split(separator)
         
-        # 确保翻译结果数量匹配
+        # 如果分隔符被破坏，尝试智能恢复
         if len(translated_texts) != len(entries):
             self.logger.warning(f"Translation count mismatch: expected {len(entries)}, got {len(translated_texts)}")
-            # 填充缺失的翻译
-            while len(translated_texts) < len(entries):
-                translated_texts.append("")
-            translated_texts = translated_texts[:len(entries)]
+            
+            # 尝试其他可能的分隔符变体
+            alternate_separators = [
+                "\n🔸🔸🔸\n",
+                "🔸🔸🔸",
+                "\n🔸🔸\n", 
+                "🔸🔸",
+                "\n"
+            ]
+            
+            for alt_sep in alternate_separators:
+                alt_split = translated_combined.split(alt_sep)
+                if len(alt_split) == len(entries):
+                    self.logger.info(f"Successfully recovered using alternate separator: '{alt_sep}'")
+                    translated_texts = alt_split
+                    break
+            
+            # 如果还是不匹配，尝试按行数分割
+            if len(translated_texts) != len(entries):
+                lines = translated_combined.split('\n')
+                if len(lines) >= len(entries):
+                    # 尝试均匀分配行
+                    lines_per_entry = len(lines) // len(entries)
+                    translated_texts = []
+                    for i in range(len(entries)):
+                        start_idx = i * lines_per_entry
+                        end_idx = start_idx + lines_per_entry if i < len(entries) - 1 else len(lines)
+                        entry_text = '\n'.join(lines[start_idx:end_idx]).strip()
+                        translated_texts.append(entry_text)
+                    self.logger.info(f"Recovered by splitting {len(lines)} lines into {len(entries)} entries")
+            
+            # 最后的保险措施：填充或截断
+            if len(translated_texts) < len(entries):
+                # 如果翻译结果太少，用原文填充
+                while len(translated_texts) < len(entries):
+                    missing_idx = len(translated_texts)
+                    translated_texts.append(entries[missing_idx]['text'])
+                self.logger.warning(f"Padded missing translations with original text")
+            elif len(translated_texts) > len(entries):
+                # 如果翻译结果太多，截断多余部分
+                translated_texts = translated_texts[:len(entries)]
+                self.logger.warning(f"Truncated excess translations")
         
         # 构建翻译结果
         batch_results = []
@@ -838,7 +1049,7 @@ class VideoProcessor(QRunnable):
                 "-vf", f"subtitles='{subtitle_path}':force_style='FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=4'",
                 "-c:v", "h264_videotoolbox",
                 "-b:v", "0",  # 使用变动比特率模式
-                "-q:v", "52", # VideoToolbox质量参数调整为55，更激进的压缩
+                "-q:v", "50", # VideoToolbox质量参数调整为55，更激进的压缩
                 "-c:a", "copy",
                 "-movflags", "+faststart",  # 优化在线播放
                 output_path,
@@ -1270,7 +1481,33 @@ class VideoProcessorForMultiprocess:
             raise
     
     def _translate_openai_batch_multiprocess(self, entries):
-        """多进程版本的OpenAI单批次翻译"""
+        """多进程版本的OpenAI单批次翻译 - 带重试机制"""
+        @exponential_backoff_retry
+        def _make_api_request():
+            """实际的API请求函数，支持重试"""
+            response = self.session.post(
+                f"{self.api_settings['base_url']}/v1/chat/completions",
+                json=data,
+                timeout=300
+            )
+            
+            # 检查HTTP状态码
+            if response.status_code != 200:
+                error_text = response.text
+                if response.status_code == 400:
+                    # 400错误通常不应该重试，但我们检查具体原因
+                    if "content_filter" in error_text.lower() or "content management policy" in error_text.lower():
+                        raise ContentFilteredException(f"Content filtered by OpenAI: {error_text}")
+                    else:
+                        raise Exception(f"OpenAI API error: {response.status_code} - {error_text}")
+                elif response.status_code in {429, 500, 502, 503, 504}:
+                    # 这些状态码可以重试
+                    raise RetryableAPIException(f"OpenAI API error: {response.status_code} - {error_text}")
+                else:
+                    raise Exception(f"OpenAI API error: {response.status_code} - {error_text}")
+            
+            return response.json()
+        
         try:
             from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
         except ImportError:
@@ -1310,21 +1547,17 @@ class VideoProcessorForMultiprocess:
             "max_tokens": 8000  # 适中的token限制
         }
 
-        response = self.session.post(
-            f"{self.api_settings['base_url']}/v1/chat/completions",
-            json=data,
-            timeout=300
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
+        try:
+            # 使用重试机制进行API请求
+            result = _make_api_request()
+            
             if 'choices' not in result or not result['choices']:
                 raise ValueError(f"Invalid API response structure: {result}")
             
             choice = result['choices'][0]
             
             if choice.get('finish_reason') == 'content_filter':
-                raise Exception("Batch translation content filtered by OpenAI safety system")
+                raise ContentFilteredException("Batch translation content filtered by OpenAI safety system")
             
             if 'message' not in choice or 'content' not in choice['message']:
                 raise ValueError(f"Invalid message structure in API response: {result}")
@@ -1367,11 +1600,80 @@ class VideoProcessorForMultiprocess:
                     'text': f"{entry['text']}\n{translated_text}"
                 })
             
-            print(f"🎙️ Process {self.process_id}: Successfully translated {len(translated_entries)} entries via OpenAI")
+            print(f"✅ Process {self.process_id}: Successfully translated {len(translated_entries)} entries via OpenAI")
             return translated_entries
-                
-        else:
-            raise Exception(f"OpenAI API error: {response.status_code} - {response.text}")
+            
+        except ContentFilteredException as e:
+            print(f"🚫 Process {self.process_id}: Content filtered by OpenAI safety system: {str(e)}")
+            # 检查是否启用 Google 降级
+            try:
+                from config import ENABLE_GOOGLE_FALLBACK
+                google_fallback_enabled = ENABLE_GOOGLE_FALLBACK
+            except ImportError:
+                google_fallback_enabled = True  # 默认启用
+            
+            if google_fallback_enabled:
+                # 对于内容过滤，尝试使用 Google Translate 作为降级方案
+                print(f"🔄 Process {self.process_id}: Falling back to Google Translate for filtered content...")
+                try:
+                    return self._translate_google_batch_multiprocess(entries, "\n🔸🔸🔸\n")
+                except Exception as google_error:
+                    print(f"❌ Process {self.process_id}: Google Translate fallback also failed: {str(google_error)}")
+                    # 如果 Google 翻译也失败，返回原文但标记为已处理
+                    fallback_entries = []
+                    for entry in entries:
+                        fallback_entries.append({
+                            'id': entry['id'],
+                            'timestamp': entry['timestamp'],
+                            'text': f"{entry['text']}\n[Translation failed - showing original]"
+                        })
+                    return fallback_entries
+            else:
+                # 如果没有启用 Google 降级，直接返回原文
+                fallback_entries = []
+                for entry in entries:
+                    fallback_entries.append({
+                        'id': entry['id'],
+                        'timestamp': entry['timestamp'],
+                        'text': f"{entry['text']}\n[Content filtered - showing original]"
+                    })
+                return fallback_entries
+            
+        except Exception as e:
+            print(f"❌ Process {self.process_id}: OpenAI translation failed after retries: {str(e)}")
+            # 检查是否启用 Google 降级
+            try:
+                from config import ENABLE_GOOGLE_FALLBACK
+                google_fallback_enabled = ENABLE_GOOGLE_FALLBACK
+            except ImportError:
+                google_fallback_enabled = True  # 默认启用
+            
+            if google_fallback_enabled:
+                # 对于其他错误，尝试使用 Google Translate 作为降级方案
+                print(f"🔄 Process {self.process_id}: Falling back to Google Translate after OpenAI failure...")
+                try:
+                    return self._translate_google_batch_multiprocess(entries, "\n🔸🔸🔸\n")
+                except Exception as google_error:
+                    print(f"❌ Process {self.process_id}: Google Translate fallback also failed: {str(google_error)}")
+                    # 如果 Google 翻译也失败，返回原文
+                    fallback_entries = []
+                    for entry in entries:
+                        fallback_entries.append({
+                            'id': entry['id'],
+                            'timestamp': entry['timestamp'],
+                            'text': entry['text']  # 保持原文
+                        })
+                    return fallback_entries
+            else:
+                # 如果没有启用 Google 降级，直接返回原文
+                fallback_entries = []
+                for entry in entries:
+                    fallback_entries.append({
+                        'id': entry['id'],
+                        'timestamp': entry['timestamp'],
+                        'text': entry['text']  # 保持原文
+                    })
+                return fallback_entries
     
     def _translate_openai_multiple_batches_multiprocess(self, entries, max_chars, max_entries):
         """多进程版本的OpenAI多批次翻译"""
@@ -1435,7 +1737,8 @@ class VideoProcessorForMultiprocess:
     def _batch_translate_with_google_multiprocess(self, entries):
         """多进程版本的Google翻译"""
         try:
-            separator = "\n---SUBTITLE_SEPARATOR---\n"
+            # 使用不会被翻译的特殊Unicode分隔符
+            separator = "\n🔸🔸🔸\n"  # 使用特殊符号，Google Translate不会翻译
             max_chars = 4500  # 留一些余量，避免超过5000字符限制
             translated_entries = []
             
@@ -1493,7 +1796,7 @@ class VideoProcessorForMultiprocess:
             raise
     
     def _translate_google_batch_multiprocess(self, entries, separator):
-        """多进程版本的Google批次翻译"""
+        """多进程版本的Google批次翻译 - 改进的分隔符处理"""
         # 提取所有需要翻译的文本
         texts_to_translate = [entry['text'] for entry in entries]
         
@@ -1508,16 +1811,54 @@ class VideoProcessorForMultiprocess:
         if not translated_combined:
             raise ValueError("Empty response from Google Translate")
         
-        # 分割翻译结果
+        # 尝试按分隔符分割翻译结果
         translated_texts = translated_combined.split(separator)
         
-        # 确保翻译结果数量匹配
+        # 如果分隔符被破坏，尝试智能恢复
         if len(translated_texts) != len(entries):
             print(f"⚠️ Process {self.process_id}: Translation count mismatch: expected {len(entries)}, got {len(translated_texts)}")
-            # 填充缺失的翻译
-            while len(translated_texts) < len(entries):
-                translated_texts.append("")
-            translated_texts = translated_texts[:len(entries)]
+            
+            # 尝试其他可能的分隔符变体
+            alternate_separators = [
+                "\n🔸🔸🔸\n",
+                "🔸🔸🔸",
+                "\n🔸🔸\n", 
+                "🔸🔸",
+                "\n"
+            ]
+            
+            for alt_sep in alternate_separators:
+                alt_split = translated_combined.split(alt_sep)
+                if len(alt_split) == len(entries):
+                    print(f"✅ Process {self.process_id}: Successfully recovered using alternate separator: '{alt_sep}'")
+                    translated_texts = alt_split
+                    break
+            
+            # 如果还是不匹配，尝试按行数分割
+            if len(translated_texts) != len(entries):
+                lines = translated_combined.split('\n')
+                if len(lines) >= len(entries):
+                    # 尝试均匀分配行
+                    lines_per_entry = len(lines) // len(entries)
+                    translated_texts = []
+                    for i in range(len(entries)):
+                        start_idx = i * lines_per_entry
+                        end_idx = start_idx + lines_per_entry if i < len(entries) - 1 else len(lines)
+                        entry_text = '\n'.join(lines[start_idx:end_idx]).strip()
+                        translated_texts.append(entry_text)
+                    print(f"✅ Process {self.process_id}: Recovered by splitting {len(lines)} lines into {len(entries)} entries")
+            
+            # 最后的保险措施：填充或截断
+            if len(translated_texts) < len(entries):
+                # 如果翻译结果太少，用原文填充
+                while len(translated_texts) < len(entries):
+                    missing_idx = len(translated_texts)
+                    translated_texts.append(entries[missing_idx]['text'])
+                print(f"⚠️ Process {self.process_id}: Padded missing translations with original text")
+            elif len(translated_texts) > len(entries):
+                # 如果翻译结果太多，截断多余部分
+                translated_texts = translated_texts[:len(entries)]
+                print(f"⚠️ Process {self.process_id}: Truncated excess translations")
         
         # 构建翻译结果
         batch_results = []

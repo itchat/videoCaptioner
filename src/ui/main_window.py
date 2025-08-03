@@ -432,6 +432,19 @@ class SubtitleProcessor(QWidget):
     def open_settings(self):
         dialog = ApiSettingsDialog(self, self.api_settings)
         if dialog.exec():
+            # Update the max_processes value used by the multiprocess manager
+            old_max_processes = self.max_processes
+            self.max_processes = self.api_settings["max_processes"]
+            
+            # If multiprocess manager exists and max_processes changed, reset it
+            if (self.multiprocess_manager is not None and 
+                old_max_processes != self.max_processes):
+                print(f"🔧 Updating max_processes from {old_max_processes} to {self.max_processes}")
+                # Clean up existing manager
+                self.multiprocess_manager.cleanup()
+                # Reset manager to None so it will be recreated with new settings
+                self.multiprocess_manager = None
+            
             # Save settings to config file
             save_config(
                 self.api_settings["base_url"], 
