@@ -61,6 +61,12 @@ python src/main.py
 bash main.sh
 ``` 
 
+### macOS .app Security Features
+- **Fork Bomb Protection**: Comprehensive protection against multiprocess fork bombs in .app environment
+- **Delayed Initialization**: MultiprocessVideoManager uses lazy loading to prevent startup issues
+- **Spawn Method**: Forces 'spawn' multiprocess start method for maximum safety
+- **Worker Protection**: All multiprocess worker functions have execution guards 
+
 ## Recent Updates (Latest Version)
 
 ### 🚀 Major Performance & Architecture Improvements
@@ -115,6 +121,7 @@ bash main.sh
 - [x] **Apple Silicon Optimization**: Dynamic process count detection and platform-specific performance tuning
 - [x] **Intelligent Task Queue System**: Advanced queue management for unlimited video processing with automatic task scheduling
 - [x] **Configuration System**: Centralized config management with platform-aware defaults and persistent user settings
+- [x] **Fork Bomb Protection**: Comprehensive macOS .app multiprocess safety with delayed initialization and spawn method enforcement
 
 ## Performance Benchmarks
 

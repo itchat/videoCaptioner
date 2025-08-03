@@ -1,6 +1,14 @@
 import sys
 import signal
 import os
+import multiprocessing as mp
+
+# 修复 macOS .app 打包环境中的多进程分叉炸弹问题
+if __name__ == "__main__":
+    # 这个调用必须在所有多进程代码之前
+    mp.freeze_support()
+    # 设置启动方法为 'spawn' 以避免在打包环境中的问题
+    mp.set_start_method('spawn', force=True)
 
 # 添加项目根目录到Python路径
 current_dir = os.path.dirname(os.path.abspath(__file__))

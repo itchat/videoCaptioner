@@ -1234,10 +1234,20 @@ class VideoProcessorForMultiprocess:
             from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH
         except ImportError:
             # 如果导入失败，使用默认值
-            OPENAI_MAX_CHARS_PER_BATCH = 8000
-            OPENAI_MAX_ENTRIES_PER_BATCH = 50
-            OPENAI_MODEL = "gpt-3.5-turbo"
-            OPENAI_CUSTOM_PROMPT = "You are a professional translator. Translate the following text to Chinese, maintaining the original meaning and tone."
+            OPENAI_MAX_CHARS_PER_BATCH = 3600
+            OPENAI_MAX_ENTRIES_PER_BATCH = 100
+            OPENAI_MODEL = "gpt-4.1-nano"
+            OPENAI_CUSTOM_PROMPT = """You are a professional Chinese native translator who needs to fluently translate text into Chinese.
+
+## Translation Rules
+1. Output only the translated content, without explanations or additional content (such as "Here's the translation:" or "Translation as follows:")
+2. The returned translation must maintain exactly the same number of paragraphs and format as the original text
+3. For content that should not be translated (such as proper nouns, code, etc.), keep the original text.
+4. If input contains %%, use %% in your output, if input has no %%, don't use %% in your output
+
+## OUTPUT FORMAT:
+- **Single paragraph input** → Output translation directly (no separators, no extra text)
+- **Multi-paragraph input** → Use %% as paragraph separator between translations"""
         
         try:
             # 从配置文件获取批处理参数
@@ -1264,8 +1274,18 @@ class VideoProcessorForMultiprocess:
         try:
             from config import OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
         except ImportError:
-            OPENAI_MODEL = "gpt-3.5-turbo"
-            OPENAI_CUSTOM_PROMPT = "You are a professional translator. Translate the following text to Chinese, maintaining the original meaning and tone."
+            OPENAI_MODEL = "gpt-4.1-nano"
+            OPENAI_CUSTOM_PROMPT = """You are a professional Chinese native translator who needs to fluently translate text into Chinese.
+
+## Translation Rules
+1. Output only the translated content, without explanations or additional content (such as "Here's the translation:" or "Translation as follows:")
+2. The returned translation must maintain exactly the same number of paragraphs and format as the original text
+3. For content that should not be translated (such as proper nouns, code, etc.), keep the original text.
+4. If input contains %%, use %% in your output, if input has no %%, don't use %% in your output
+
+## OUTPUT FORMAT:
+- **Single paragraph input** → Output translation directly (no separators, no extra text)
+- **Multi-paragraph input** → Use %% as paragraph separator between translations"""
         
         # 构建翻译文本 - 使用 %% 分隔符
         if len(entries) == 1:
@@ -1522,6 +1542,17 @@ class MultiprocessVideoManager:
     """多进程视频处理管理器"""
     
     def __init__(self, max_processes: Optional[int] = None):
+        # 防止在 macOS .app 打包环境中出现分叉炸弹
+        try:
+            # 确保多进程启动方法设置正确
+            if hasattr(mp, 'get_start_method'):
+                current_method = mp.get_start_method(allow_none=True)
+                if current_method != 'spawn':
+                    mp.set_start_method('spawn', force=True)
+        except RuntimeError:
+            # 启动方法已经设置，忽略错误
+            pass
+            
         self.processes = []
         self.active_processes = {}  # 跟踪活动进程 {process_id: process_info}
         self.pending_tasks = []  # 等待处理的任务队列
@@ -1776,6 +1807,10 @@ class MultiprocessVideoManager:
                 break
         
         print("🧹 Multiprocess manager cleanup completed")
+    
+    def shutdown(self):
+        """关闭多进程管理器（cleanup的别名，保持兼容性）"""
+        self.cleanup()
 
 
 

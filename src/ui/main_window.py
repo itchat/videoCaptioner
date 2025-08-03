@@ -19,7 +19,7 @@ from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
 from .download_dialog import DownloadDialog
 from core.video_processor import MultiprocessVideoManager
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, save_config
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES, save_config
 import multiprocessing as mp
 
 
@@ -96,7 +96,8 @@ class SubtitleProcessor(QWidget):
             "model": OPENAI_MODEL,
             "custom_prompt": OPENAI_CUSTOM_PROMPT,
             "max_chars_per_batch": OPENAI_MAX_CHARS_PER_BATCH,
-            "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH
+            "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH,
+            "max_processes": MAX_PROCESSES
         }
         
         # 初始化多进程管理器而不是线程池
@@ -136,19 +137,25 @@ class SubtitleProcessor(QWidget):
             except Exception:
                 pass
         
-        # 保守的进程数设置
-        if is_apple_silicon:
-            max_processes = min(4, cpu_count)  # Apple Silicon最多4个进程
-        else:
-            max_processes = min(2, cpu_count)  # 其他平台最多2个进程
+        # 使用配置文件中的进程数设置，而不是硬编码
+        # 如果配置值超出合理范围，则进行限制
+        self.max_processes = min(MAX_PROCESSES, cpu_count)  # 使用配置中的设置，但不超过CPU核心数
         
-        self.multiprocess_manager = MultiprocessVideoManager(max_processes=max_processes)
+        # 延迟初始化多进程管理器，避免在 macOS .app 打包环境中出现分叉炸弹
+        self.multiprocess_manager = None
         
-        print(f"🔧 Multiprocess manager initialized with {max_processes} max processes")
+        print(f"🔧 Multiprocess settings: {self.max_processes} max processes (configured: {MAX_PROCESSES})")
         print(f"💻 System: {platform.system()} - {cpu_count} cores")
         
         if is_apple_silicon:
             print("🍎 Apple Silicon detected - using optimized multiprocessing")
+
+    def _ensure_multiprocess_manager(self):
+        """确保多进程管理器已初始化（延迟初始化）"""
+        if self.multiprocess_manager is None:
+            # 只有在真正需要时才创建多进程管理器
+            print(f"🔧 Initializing multiprocess manager with {self.max_processes} max processes")
+            self.multiprocess_manager = MultiprocessVideoManager(max_processes=self.max_processes)
 
     def init_ui(self):
         main_layout = QVBoxLayout()
@@ -193,7 +200,7 @@ class SubtitleProcessor(QWidget):
         self.start_button.clicked.connect(self.process_files)
         self.start_button.setEnabled(False)
 
-        self.settings_button = QPushButton("Setting API")
+        self.settings_button = QPushButton("SETTING")
         self.settings_button.clicked.connect(self.open_settings)
 
         self.clear_button = QPushButton("Clear History")
@@ -315,6 +322,9 @@ class SubtitleProcessor(QWidget):
         self.total_processes = len(self.video_paths)
         self.active_process_ids.clear()
 
+        # 确保多进程管理器已初始化
+        self._ensure_multiprocess_manager()
+
         # 启动所有视频处理进程
         for video_path in self.video_paths:
             try:
@@ -337,6 +347,10 @@ class SubtitleProcessor(QWidget):
     def check_process_updates(self):
         """检查进程更新 - 定时器回调"""
         try:
+            # 如果多进程管理器未初始化，跳过检查
+            if self.multiprocess_manager is None:
+                return
+                
             # 获取进度更新
             progress_updates = self.multiprocess_manager.get_progress_updates()
             for update in progress_updates:
@@ -425,15 +439,16 @@ class SubtitleProcessor(QWidget):
                 self.api_settings["model"],
                 self.api_settings["custom_prompt"],
                 self.api_settings["max_chars_per_batch"],
-                self.api_settings["max_entries_per_batch"]
+                self.api_settings["max_entries_per_batch"],
+                self.api_settings["max_processes"]
             )
 
-            QMessageBox.information(
-                self,
-                "Save Settings",
-                "API Settings have been updated and saved",
-                QMessageBox.StandardButton.Ok,
-            )
+            # QMessageBox.information(
+            #     self,
+            #     "Save Settings",
+            #     "API Settings have been updated and saved",
+            #     QMessageBox.StandardButton.Ok,
+            # )
 
     def reset_ui_state(self):
         self.is_processing = False
@@ -484,7 +499,7 @@ class SubtitleProcessor(QWidget):
                 self.process_timer.stop()
             
             # 关闭多进程管理器
-            if hasattr(self, 'multiprocess_manager'):
+            if hasattr(self, 'multiprocess_manager') and self.multiprocess_manager is not None:
                 self.multiprocess_manager.shutdown()
                 
         except Exception as e:

@@ -81,7 +81,7 @@ class SpeechRecognizer:
         print(f"🎙️ SpeechRecognizer initialized for process {self._process_id}")
         
     def _load_model(self):
-        """加载模型 - 进程和线程安全版本"""
+        """加载模型 - 进程和线程安全版本，防止多进程重复下载"""
         # 双重检查锁定模式
         if self._model is not None:
             return
@@ -94,28 +94,79 @@ class SpeechRecognizer:
             if self.logger:
                 self.logger.info(f"Process {self._process_id}: Loading model: {self.model_name}")
                 
-            # 检查模型是否需要下载（简单方式：检查缓存目录）
-            needs_download = self._check_if_model_needs_download()
-            
-            # 只有在需要下载时才通知UI显示下载对话框
-            if needs_download and self.download_callback:
-                self.download_callback(self.model_name)
-                
-            if needs_download and self.status_callback:
-                self.status_callback("Initializing model download...")
-            elif self.status_callback:
-                self.status_callback("Loading cached model...")
-                
             try:
-                # 使用新的 parakeet_mlx API
-                if needs_download and self.status_callback:
-                    self.status_callback(f"Downloading {self.model_name}...")
+                # 使用文件锁防止进程间重复下载
+                import tempfile
+                import fcntl
+                
+                lock_file_path = os.path.join(tempfile.gettempdir(), f"parakeet_download_{self.model_name.replace('/', '_')}.lock")
+                
+                try:
+                    # 创建进程间锁文件
+                    with open(lock_file_path, 'w') as lock_file:
+                        try:
+                            # 尝试获取独占锁
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            print(f"🔒 Process {self._process_id}: Acquired download lock")
+                            
+                            # 再次检查模型是否需要下载（在锁内重新检查）
+                            needs_download = self._check_if_model_needs_download()
+                            
+                            # 只有在需要下载时才通知UI显示下载对话框
+                            if needs_download and self.download_callback:
+                                self.download_callback(self.model_name)
+                                
+                            if needs_download and self.status_callback:
+                                self.status_callback("Initializing model download...")
+                            elif self.status_callback:
+                                self.status_callback("Loading cached model...")
+                                
+                            # 使用新的 parakeet_mlx API
+                            if needs_download and self.status_callback:
+                                self.status_callback(f"Downloading {self.model_name}...")
+                                
+                            # 加载模型
+                            print(f"📥 Process {self._process_id}: Loading model from {'cache' if not needs_download else 'download'}")
+                            self._model = from_pretrained(self.model_name)
+                            
+                            # 释放锁（函数结束时自动释放）
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                            print(f"🔓 Process {self._process_id}: Released download lock")
+                            
+                        except IOError:
+                            # 无法获取锁，说明其他进程正在下载
+                            print(f"⏳ Process {self._process_id}: Another process is downloading, waiting...")
+                            if self.status_callback:
+                                self.status_callback("Another process is downloading the model, please wait...")
+                            
+                            # 阻塞等待锁（其他进程下载完成）
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                            print(f"✅ Process {self._process_id}: Download completed by other process, loading cached model")
+                            
+                            if self.status_callback:
+                                self.status_callback("Loading cached model...")
+                                
+                            # 直接加载已缓存的模型
+                            self._model = from_pretrained(self.model_name)
+                            
+                            # 释放锁
+                            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                            
+                except Exception as e:
+                    print(f"⚠️ Process {self._process_id}: File lock failed, falling back to direct loading: {e}")
+                    # 文件锁失败时的备用方案
+                    needs_download = self._check_if_model_needs_download()
                     
-                # 加载模型
-                self._model = from_pretrained(self.model_name)
-                
-                # 注意：新版parakeet-mlx不再需要单独的processor参数
-                
+                    if needs_download and self.download_callback:
+                        self.download_callback(self.model_name)
+                        
+                    if needs_download and self.status_callback:
+                        self.status_callback("Initializing model download...")
+                    elif self.status_callback:
+                        self.status_callback("Loading cached model...")
+                        
+                    self._model = from_pretrained(self.model_name)
+                    
                 # 配置模型参数
                 if hasattr(self._model, 'set_dtype'):
                     dtype = float32 if self.fp32 else bfloat16
@@ -134,11 +185,7 @@ class SpeechRecognizer:
                     
                 if self.status_callback:
                     self.status_callback("Model loaded successfully!")
-                        
-                # 通知下载完成（如果是首次下载）
-                if needs_download and self.progress_callback:
-                    self.progress_callback(100, 0, 0, 0)  # 100% 完成
-                        
+                    
             except Exception as e:
                 error_msg = f"Process {self._process_id}: Error loading model {self.model_name}: {e}"
                 if self.logger:
@@ -146,25 +193,64 @@ class SpeechRecognizer:
                 raise RuntimeError(error_msg)
     
     def _check_if_model_needs_download(self):
-        """检查模型是否需要下载"""
+        """检查模型是否需要下载 - 改进版本，检查关键模型文件"""
         try:
             import os
-            from huggingface_hub import hf_hub_download, try_to_load_from_cache
+            from huggingface_hub import try_to_load_from_cache
             
-            # 检查Hugging Face缓存中是否存在模型文件
-            # 这是一个简化的检查，实际的模型文件可能有多个
-            try:
-                # 尝试从缓存加载，如果不存在会返回None
-                cached_file = try_to_load_from_cache(
-                    repo_id=self.model_name,
-                    filename="config.json"  # 检查配置文件
-                )
-                return cached_file is None
-            except:
-                # 如果检查失败，假设需要下载
-                return True
+            # 检查MLX模型的关键文件是否已缓存
+            # 根据实际模型结构调整检查的文件列表
+            essential_files = [
+                "config.json",           # 模型配置
+                "model.safetensors",     # 主要的模型权重文件
+            ]
+            
+            # 可选文件（如果存在更好，但不是必需的）
+            optional_files = [
+                "tokenizer.json",        # tokenizer配置
+                "preprocessor_config.json"  # 预处理器配置
+            ]
+            
+            print(f"🔍 Process {self._process_id}: Checking cache for model {self.model_name}")
+            
+            # 检查必需文件
+            for filename in essential_files:
+                try:
+                    cached_file = try_to_load_from_cache(
+                        repo_id=self.model_name,
+                        filename=filename
+                    )
+                    if cached_file is None:
+                        print(f"❌ Process {self._process_id}: Missing essential cached file: {filename}")
+                        return True
+                    else:
+                        print(f"✅ Process {self._process_id}: Found essential cached file: {filename}")
+                except Exception as e:
+                    print(f"⚠️ Process {self._process_id}: Error checking {filename}: {e}")
+                    return True
+            
+            # 检查可选文件（仅用于信息显示）
+            for filename in optional_files:
+                try:
+                    cached_file = try_to_load_from_cache(
+                        repo_id=self.model_name,
+                        filename=filename
+                    )
+                    if cached_file is None:
+                        print(f"ℹ️ Process {self._process_id}: Optional file not cached: {filename}")
+                    else:
+                        print(f"✅ Process {self._process_id}: Found optional cached file: {filename}")
+                except Exception as e:
+                    print(f"ℹ️ Process {self._process_id}: Optional file check failed for {filename}: {e}")
+            
+            print(f"✅ Process {self._process_id}: All essential files found in cache, no download needed")
+            return False
+            
         except ImportError:
-            # 如果没有huggingface_hub，假设需要下载
+            print(f"⚠️ Process {self._process_id}: huggingface_hub not available, assuming download needed")
+            return True
+        except Exception as e:
+            print(f"⚠️ Process {self._process_id}: Cache check failed: {e}, assuming download needed")
             return True
     
     def transcribe(self, 
