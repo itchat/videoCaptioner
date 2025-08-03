@@ -161,7 +161,8 @@ class ApiSettingsDialog(QDialog):
         
         self.prompt_text = QTextEdit(self)
         self.prompt_text.setPlainText(self.api_settings.get("custom_prompt", ""))
-        # 设置合适的高度，让文本区域更紧凑
+        # 确保文本颜色为白色（适配深色主题）
+        self.prompt_text.setStyleSheet("QTextEdit { color: white; }")
         # self.prompt_text.setFixedHeight(80)  # 减小高度
         layout.addWidget(self.prompt_text)
         

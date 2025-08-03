@@ -97,7 +97,7 @@ app = BUNDLE(
             'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:@executable_path:@executable_path/../Resources:@executable_path/Contents/MacOS'
         },
         'NSAppleEventsUsageDescription': 'This app needs access to keyboard events for shortcuts like Command+Q',
-        'NSHumanReadableCopyright': 'Copyright © 2023',
+        'NSHumanReadableCopyright': 'Copyright © 2025',
         'NSPrincipalClass': 'NSApplication',
         'NSRequiresAquaSystemAppearance': 'No',
         'NSSupportsAutomaticGraphicsSwitching': True,
