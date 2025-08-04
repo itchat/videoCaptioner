@@ -262,6 +262,16 @@ class VideoProcessor(QRunnable):
             self.logger.info("Subtitle translation completed")
             self.report_progress(80)
 
+            # 检查是否需要跳过字幕烧录
+            skip_burning = self.api_settings.get('skip_subtitle_burning', False)
+            if skip_burning:
+                self.report_status("Processing completed! (Subtitles saved, video burning skipped)")
+                self.logger.info("Video processing completed (subtitle burning skipped)")
+                self.report_progress(100)
+                # Send Completion Signal
+                self.signals.finished.emit()
+                return
+
             # Composite Video (80-100%)
             self.report_status("Synthesizing video...")
             self.burn_subtitles(cache_paths['bilingual_srt'], cache_paths['output_video'])
@@ -299,12 +309,13 @@ class VideoProcessor(QRunnable):
 
     def get_cache_paths(self):
         base_name = os.path.splitext(self.base_name)[0]
+        video_dir = os.path.dirname(self.video_path)  # 视频文件所在目录
         return {
-            'audio': os.path.join(self.cache_dir, f"{base_name}_audio.wav"),
-            'srt': os.path.join(self.cache_dir, f"{base_name}_output.srt"),
-            'bilingual_srt': os.path.join(self.cache_dir, f"{base_name}_bilingual.srt"),
+            'audio': os.path.join(self.cache_dir, f"{base_name}_audio.wav"),  # 音频文件保持在cache目录
+            'srt': os.path.join(video_dir, f"{base_name}_output.srt"),  # 原字幕保存到视频目录
+            'bilingual_srt': os.path.join(video_dir, f"{base_name}_bilingual.srt"),  # 双语字幕保存到视频目录
             'output_video': os.path.join(
-                os.path.dirname(self.video_path),
+                video_dir,  # 输出视频也保存到视频目录
                 f"{base_name}_subtitled_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                 f"{os.path.splitext(self.video_path)[1]}"
             )
@@ -361,11 +372,14 @@ class VideoProcessor(QRunnable):
             
         try:
             cmd = [ffmpeg_path, "-i", self.video_path, "-hide_banner", "-f", "null", "-"]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # 增加到60秒
             
             # 检查stderr输出中是否有音频流信息
             stderr_output = result.stderr.lower()
             return "audio:" in stderr_output or "stream #" in stderr_output and ("audio" in stderr_output or "mp3" in stderr_output or "aac" in stderr_output or "wav" in stderr_output)
+        except subprocess.TimeoutExpired:
+            self.logger.warning(f"Audio stream check timed out for large file: {self.base_name}")
+            return True  # 对于大文件，假设有音频流
         except Exception as e:
             self.logger.warning(f"Could not check audio streams: {e}")
             return True  # 默认假设有音频，让extract_audio处理
@@ -1262,6 +1276,19 @@ class VideoProcessorForMultiprocess:
                 f.write(translated_content)
             self.report_progress(80)
             
+            # 检查是否需要跳过字幕烧录
+            skip_burning = self.api_settings.get('skip_subtitle_burning', False)
+            if skip_burning:
+                self.report_status("Processing completed! (Subtitles saved, video burning skipped)")
+                self.report_progress(100)
+                return {
+                    'status': 'completed',
+                    'subtitle_path': cache_paths['bilingual_srt'],
+                    'original_subtitle_path': cache_paths['srt'],
+                    'cache_paths': cache_paths,
+                    'skipped_burning': True
+                }
+            
             # 视频合成 (80-100%)
             self.report_status("Synthesizing video...")
             self.burn_subtitles(cache_paths['bilingual_srt'], cache_paths['output_video'])
@@ -1271,7 +1298,8 @@ class VideoProcessorForMultiprocess:
             return {
                 'status': 'completed',
                 'output_path': cache_paths['output_video'],
-                'cache_paths': cache_paths
+                'cache_paths': cache_paths,
+                'skipped_burning': False
             }
             
         except Exception as e:

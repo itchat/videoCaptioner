@@ -1,8 +1,9 @@
 from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
-                             QPushButton, QComboBox, QTextEdit, QSpinBox, QMessageBox)
+                             QPushButton, QComboBox, QTextEdit, QSpinBox, QMessageBox, QCheckBox)
 from PyQt6.QtCore import Qt
 from config import (OPENAI_CUSTOM_PROMPT, DEFAULT_CUSTOM_PROMPT, DEFAULT_MAX_CHARS_PER_BATCH, 
-                   DEFAULT_MAX_ENTRIES_PER_BATCH, DEFAULT_MAX_PROCESSES, OPENAI_BASE_URL, OPENAI_MODEL)
+                   DEFAULT_MAX_ENTRIES_PER_BATCH, DEFAULT_MAX_PROCESSES, OPENAI_BASE_URL, OPENAI_MODEL,
+                   DEFAULT_SKIP_SUBTITLE_BURNING)
 
 
 class ApiSettingsDialog(QDialog):
@@ -15,7 +16,8 @@ class ApiSettingsDialog(QDialog):
             "custom_prompt": OPENAI_CUSTOM_PROMPT,
             "max_chars_per_batch": DEFAULT_MAX_CHARS_PER_BATCH,
             "max_entries_per_batch": DEFAULT_MAX_ENTRIES_PER_BATCH,
-            "max_processes": DEFAULT_MAX_PROCESSES
+            "max_processes": DEFAULT_MAX_PROCESSES,
+            "skip_subtitle_burning": DEFAULT_SKIP_SUBTITLE_BURNING
         }
         self.initUI()
 
@@ -148,6 +150,13 @@ class ApiSettingsDialog(QDialog):
         self.max_processes_spinbox.setFixedHeight(32)
         layout.addWidget(self.max_processes_spinbox)
         
+        layout.addSpacing(8)  # 添加间距
+        
+        # Skip Subtitle Burning Checkbox
+        self.skip_burning_checkbox = QCheckBox("Skip burning subtitles into video", self)
+        self.skip_burning_checkbox.setChecked(self.api_settings.get("skip_subtitle_burning", DEFAULT_SKIP_SUBTITLE_BURNING))
+        layout.addWidget(self.skip_burning_checkbox)
+        
         # 移除stretch，让布局紧凑
         return layout
 
@@ -206,6 +215,7 @@ class ApiSettingsDialog(QDialog):
         max_chars_per_batch = self.max_chars_spinbox.value()
         max_entries_per_batch = self.max_entries_spinbox.value()
         max_processes = self.max_processes_spinbox.value()
+        skip_subtitle_burning = self.skip_burning_checkbox.isChecked()
 
         # 只验证 API Key 是否为空
         if not api_key:
@@ -241,6 +251,7 @@ class ApiSettingsDialog(QDialog):
         self.api_settings["max_chars_per_batch"] = max_chars_per_batch
         self.api_settings["max_entries_per_batch"] = max_entries_per_batch
         self.api_settings["max_processes"] = max_processes
+        self.api_settings["skip_subtitle_burning"] = skip_subtitle_burning
 
         # 显示成功消息
         QMessageBox.information(self, "Settings Saved", 
@@ -257,3 +268,4 @@ class ApiSettingsDialog(QDialog):
         self.max_chars_spinbox.setValue(DEFAULT_MAX_CHARS_PER_BATCH)
         self.max_entries_spinbox.setValue(DEFAULT_MAX_ENTRIES_PER_BATCH)
         self.max_processes_spinbox.setValue(DEFAULT_MAX_PROCESSES)
+        self.skip_burning_checkbox.setChecked(DEFAULT_SKIP_SUBTITLE_BURNING)

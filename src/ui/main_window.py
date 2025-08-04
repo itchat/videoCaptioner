@@ -19,7 +19,7 @@ from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
 from .download_dialog import DownloadDialog
 from core.video_processor import MultiprocessVideoManager
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES, save_config
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES, save_config, SKIP_SUBTITLE_BURNING
 import multiprocessing as mp
 
 
@@ -97,7 +97,8 @@ class SubtitleProcessor(QWidget):
             "custom_prompt": OPENAI_CUSTOM_PROMPT,
             "max_chars_per_batch": OPENAI_MAX_CHARS_PER_BATCH,
             "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH,
-            "max_processes": MAX_PROCESSES
+            "max_processes": MAX_PROCESSES,
+            "skip_subtitle_burning": SKIP_SUBTITLE_BURNING  # 从config加载
         }
         
         # 初始化多进程管理器而不是线程池
@@ -224,7 +225,9 @@ class SubtitleProcessor(QWidget):
             
             for file_path in files:
                 if self.drop_area.is_video_file(file_path):
-                    video_files.append(file_path)
+                    # 检查是否已经在队列中，避免重复添加
+                    if file_path not in self.file_paths:
+                        video_files.append(file_path)
                 else:
                     invalid_files.append(file_path)
             
@@ -239,12 +242,12 @@ class SubtitleProcessor(QWidget):
                     QMessageBox.StandardButton.Ok,
                 )
             
-            self.file_paths = video_files
-            
-            if self.file_paths:
+            # 将新的视频文件添加到现有队列，而不是替换
+            if video_files:
+                self.file_paths.extend(video_files)  # 使用extend而不是赋值
                 self.setup_progress_widgets()
                 self.start_button.setEnabled(True)
-            else:
+            elif not self.file_paths:  # 只有在没有有效文件时才禁用按钮
                 self.start_button.setEnabled(False)
         else:
             QMessageBox.warning(
@@ -457,7 +460,8 @@ class SubtitleProcessor(QWidget):
                 self.api_settings["custom_prompt"],
                 self.api_settings["max_chars_per_batch"],
                 self.api_settings["max_entries_per_batch"],
-                self.api_settings["max_processes"]
+                self.api_settings["max_processes"],
+                skip_subtitle_burning=self.api_settings["skip_subtitle_burning"]
             )
 
             # QMessageBox.information(

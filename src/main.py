@@ -17,9 +17,13 @@ sys.path.insert(0, project_root)
 
 from PyQt6.QtWidgets import QApplication
 from src.ui.main_window import MainWindow
+from config import load_config
 
 
 def main():
+    # 加载配置文件
+    load_config()
+    
     # 设置环境变量抑制警告
     os.environ['PYTHONWARNINGS'] = 'ignore::UserWarning'
     

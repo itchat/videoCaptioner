@@ -82,11 +82,17 @@ DEFAULT_RETRY_BASE_DELAY = 1.0  # 基础延迟时间（秒）
 DEFAULT_RETRY_MAX_DELAY = 60.0  # 最大延迟时间（秒）
 DEFAULT_ENABLE_GOOGLE_FALLBACK = True  # 是否启用 Google 翻译降级
 
+# 视频处理配置默认值
+DEFAULT_SKIP_SUBTITLE_BURNING = False  # 是否跳过字幕烧录到视频
+
 # 当前API重试参数，会被load_config修改
 MAX_RETRIES = DEFAULT_MAX_RETRIES
 RETRY_BASE_DELAY = DEFAULT_RETRY_BASE_DELAY  
 RETRY_MAX_DELAY = DEFAULT_RETRY_MAX_DELAY
 ENABLE_GOOGLE_FALLBACK = DEFAULT_ENABLE_GOOGLE_FALLBACK
+
+# 当前视频处理参数，会被load_config修改
+SKIP_SUBTITLE_BURNING = DEFAULT_SKIP_SUBTITLE_BURNING
 
 # 当前批处理参数，会被load_config修改
 OPENAI_MAX_CHARS_PER_BATCH = DEFAULT_MAX_CHARS_PER_BATCH
@@ -121,6 +127,7 @@ def load_config():
     global OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
     global OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES
     global MAX_RETRIES, RETRY_BASE_DELAY, RETRY_MAX_DELAY, ENABLE_GOOGLE_FALLBACK
+    global SKIP_SUBTITLE_BURNING
 
     # Create config directory if it doesn't exist
     if not os.path.exists(CONFIG_DIR):
@@ -143,15 +150,18 @@ def load_config():
                 RETRY_BASE_DELAY = config.get("retry_base_delay", DEFAULT_RETRY_BASE_DELAY)
                 RETRY_MAX_DELAY = config.get("retry_max_delay", DEFAULT_RETRY_MAX_DELAY)
                 ENABLE_GOOGLE_FALLBACK = config.get("enable_google_fallback", DEFAULT_ENABLE_GOOGLE_FALLBACK)
+                # 新增视频处理配置
+                SKIP_SUBTITLE_BURNING = config.get("skip_subtitle_burning", DEFAULT_SKIP_SUBTITLE_BURNING)
         except Exception as e:
             print(f"Error loading config: {e}")
 
 
-def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per_batch=None, max_entries_per_batch=None, max_processes=None, max_retries=None, retry_base_delay=None, retry_max_delay=None, enable_google_fallback=None):
+def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per_batch=None, max_entries_per_batch=None, max_processes=None, max_retries=None, retry_base_delay=None, retry_max_delay=None, enable_google_fallback=None, skip_subtitle_burning=None):
     """Save configuration to file"""
     global OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT
     global OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES
     global MAX_RETRIES, RETRY_BASE_DELAY, RETRY_MAX_DELAY, ENABLE_GOOGLE_FALLBACK
+    global SKIP_SUBTITLE_BURNING
     
     # Create config directory if it doesn't exist
     if not os.path.exists(CONFIG_DIR):
@@ -171,7 +181,9 @@ def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per
             "max_retries": max_retries if max_retries is not None else DEFAULT_MAX_RETRIES,
             "retry_base_delay": retry_base_delay if retry_base_delay is not None else DEFAULT_RETRY_BASE_DELAY,
             "retry_max_delay": retry_max_delay if retry_max_delay is not None else DEFAULT_RETRY_MAX_DELAY,
-            "enable_google_fallback": enable_google_fallback if enable_google_fallback is not None else DEFAULT_ENABLE_GOOGLE_FALLBACK
+            "enable_google_fallback": enable_google_fallback if enable_google_fallback is not None else DEFAULT_ENABLE_GOOGLE_FALLBACK,
+            # 新增视频处理配置
+            "skip_subtitle_burning": skip_subtitle_burning if skip_subtitle_burning is not None else DEFAULT_SKIP_SUBTITLE_BURNING
         }
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=2)
@@ -189,6 +201,8 @@ def save_config(base_url, api_key, model=None, custom_prompt=None, max_chars_per
         RETRY_BASE_DELAY = retry_base_delay if retry_base_delay is not None else DEFAULT_RETRY_BASE_DELAY
         RETRY_MAX_DELAY = retry_max_delay if retry_max_delay is not None else DEFAULT_RETRY_MAX_DELAY
         ENABLE_GOOGLE_FALLBACK = enable_google_fallback if enable_google_fallback is not None else DEFAULT_ENABLE_GOOGLE_FALLBACK
+        # 更新视频处理配置
+        SKIP_SUBTITLE_BURNING = skip_subtitle_burning if skip_subtitle_burning is not None else DEFAULT_SKIP_SUBTITLE_BURNING
 
         return True
     except Exception as e:
