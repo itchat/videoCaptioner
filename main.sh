@@ -1,3 +1,4 @@
+conda activate video
 sudo rm -rf ~/.qt_material/
 pip install -r requirements.txt
 sudo rm -rf dist build
