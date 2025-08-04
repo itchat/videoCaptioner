@@ -29,15 +29,14 @@ class SpeechRecognizer:
         if current_pid not in cls._instances:
             with cls._lock:
                 if current_pid not in cls._instances:
-                    print(f"🎙️ Creating new SpeechRecognizer instance for process {current_pid}")
                     instance = super().__new__(cls)
                     instance._initialized = False
                     instance._process_id = current_pid
                     cls._instances[current_pid] = instance
                 else:
-                    print(f"🎙️ Reusing SpeechRecognizer instance for process {current_pid}")
+                    pass  # Reusing instance for current process
         else:
-            print(f"🎙️ Reusing existing SpeechRecognizer instance for process {current_pid}")
+            pass  # Reusing existing instance for current process
             
         return cls._instances[current_pid]
     
@@ -78,7 +77,8 @@ class SpeechRecognizer:
         self._model = None
         self._initialized = True
         
-        print(f"🎙️ SpeechRecognizer initialized for process {self._process_id}")
+        if self.logger:
+            self.logger.info(f"SpeechRecognizer initialized for process {self._process_id}")
         
     def _load_model(self):
         """加载模型 - 进程和线程安全版本，防止多进程重复下载"""
@@ -102,7 +102,8 @@ class SpeechRecognizer:
                     fcntl_available = True
                 except ImportError:
                     fcntl_available = False
-                    print(f"⚠️ Process {self._process_id}: fcntl not available on this platform, skipping file locking")
+                    if self.logger:
+                        self.logger.warning(f"Process {self._process_id}: fcntl not available on this platform, skipping file locking")
                 
                 lock_file_path = os.path.join(tempfile.gettempdir(), f"parakeet_download_{self.model_name.replace('/', '_')}.lock")
                 
@@ -113,7 +114,8 @@ class SpeechRecognizer:
                             try:
                                 # 尝试获取独占锁
                                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                                print(f"🔒 Process {self._process_id}: Acquired download lock")
+                                if self.logger:
+                                    self.logger.info(f"Process {self._process_id}: Acquired download lock")
                                 
                                 # 再次检查模型是否需要下载（在锁内重新检查）
                                 needs_download = self._check_if_model_needs_download()
@@ -132,22 +134,26 @@ class SpeechRecognizer:
                                     self.status_callback(f"Downloading {self.model_name}...")
                                     
                                 # 加载模型
-                                print(f"📥 Process {self._process_id}: Loading model from {'cache' if not needs_download else 'download'}")
+                                if self.logger:
+                                    self.logger.info(f"Process {self._process_id}: Loading model from {'cache' if not needs_download else 'download'}")
                                 self._model = from_pretrained(self.model_name)
                                 
                                 # 释放锁（函数结束时自动释放）
                                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                                print(f"🔓 Process {self._process_id}: Released download lock")
+                                if self.logger:
+                                    self.logger.info(f"Process {self._process_id}: Released download lock")
                                 
                             except IOError:
                                 # 无法获取锁，说明其他进程正在下载
-                                print(f"⏳ Process {self._process_id}: Another process is downloading, waiting...")
+                                if self.logger:
+                                    self.logger.info(f"Process {self._process_id}: Another process is downloading, waiting...")
                                 if self.status_callback:
                                     self.status_callback("Another process is downloading the model, please wait...")
                                 
                                 # 阻塞等待锁（其他进程下载完成）
                                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-                                print(f"✅ Process {self._process_id}: Download completed by other process, loading cached model")
+                                if self.logger:
+                                    self.logger.info(f"Process {self._process_id}: Download completed by other process, loading cached model")
                                 
                                 if self.status_callback:
                                     self.status_callback("Loading cached model...")
@@ -159,7 +165,8 @@ class SpeechRecognizer:
                                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
                                 
                     except Exception as e:
-                        print(f"⚠️ Process {self._process_id}: File lock failed, falling back to direct loading: {e}")
+                        if self.logger:
+                            self.logger.warning(f"Process {self._process_id}: File lock failed, falling back to direct loading: {e}")
                         # 文件锁失败时的备用方案
                         needs_download = self._check_if_model_needs_download()
                         
@@ -174,7 +181,8 @@ class SpeechRecognizer:
                         self._model = from_pretrained(self.model_name)
                 else:
                     # fcntl不可用，直接加载模型
-                    print(f"📥 Process {self._process_id}: Loading model directly (no file locking)")
+                    if self.logger:
+                        self.logger.info(f"Process {self._process_id}: Loading model directly (no file locking)")
                     needs_download = self._check_if_model_needs_download()
                     
                     if needs_download and self.download_callback:
@@ -192,11 +200,14 @@ class SpeechRecognizer:
                     if hasattr(self._model, 'set_dtype'):
                         dtype = float32 if self.fp32 else bfloat16
                         self._model.set_dtype(dtype)
-                        print(f"🎙️ Process {self._process_id}: Model dtype set to {dtype}")
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Model dtype set to {dtype}")
                     else:
-                        print(f"🎙️ Process {self._process_id}: Model does not support set_dtype method")
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Model does not support set_dtype method")
                 except Exception as e:
-                    print(f"⚠️ Process {self._process_id}: Failed to set model dtype: {e}")
+                    if self.logger:
+                        self.logger.warning(f"Process {self._process_id}: Failed to set model dtype: {e}")
                 
                 try:
                     if self.local_attention and hasattr(self._model, 'set_local_attention'):
@@ -204,11 +215,14 @@ class SpeechRecognizer:
                             enabled=True,
                             context_size=self.local_attention_context_size
                         )
-                        print(f"🎙️ Process {self._process_id}: Local attention enabled with context size {self.local_attention_context_size}")
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Local attention enabled with context size {self.local_attention_context_size}")
                     else:
-                        print(f"🎙️ Process {self._process_id}: Model does not support set_local_attention method")
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Model does not support set_local_attention method")
                 except Exception as e:
-                    print(f"⚠️ Process {self._process_id}: Failed to set local attention: {e}")
+                    if self.logger:
+                        self.logger.warning(f"Process {self._process_id}: Failed to set local attention: {e}")
                     
                 if self.logger:
                     self.logger.info(f"Process {self._process_id}: Model loaded successfully")
@@ -241,7 +255,8 @@ class SpeechRecognizer:
                 "preprocessor_config.json"  # 预处理器配置
             ]
             
-            print(f"🔍 Process {self._process_id}: Checking cache for model {self.model_name}")
+            if self.logger:
+                self.logger.info(f"Process {self._process_id}: Checking cache for model {self.model_name}")
             
             # 检查必需文件
             for filename in essential_files:
@@ -251,12 +266,15 @@ class SpeechRecognizer:
                         filename=filename
                     )
                     if cached_file is None:
-                        print(f"❌ Process {self._process_id}: Missing essential cached file: {filename}")
+                        if self.logger:
+                            self.logger.warning(f"Process {self._process_id}: Missing essential cached file: {filename}")
                         return True
                     else:
-                        print(f"✅ Process {self._process_id}: Found essential cached file: {filename}")
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Found essential cached file: {filename}")
                 except Exception as e:
-                    print(f"⚠️ Process {self._process_id}: Error checking {filename}: {e}")
+                    if self.logger:
+                        self.logger.warning(f"Process {self._process_id}: Error checking {filename}: {e}")
                     return True
             
             # 检查可选文件（仅用于信息显示）
@@ -267,20 +285,26 @@ class SpeechRecognizer:
                         filename=filename
                     )
                     if cached_file is None:
-                        print(f"ℹ️ Process {self._process_id}: Optional file not cached: {filename}")
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Optional file not cached: {filename}")
                     else:
-                        print(f"✅ Process {self._process_id}: Found optional cached file: {filename}")
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Found optional cached file: {filename}")
                 except Exception as e:
-                    print(f"ℹ️ Process {self._process_id}: Optional file check failed for {filename}: {e}")
+                    if self.logger:
+                        self.logger.info(f"Process {self._process_id}: Optional file check failed for {filename}: {e}")
             
-            print(f"✅ Process {self._process_id}: All essential files found in cache, no download needed")
+            if self.logger:
+                self.logger.info(f"Process {self._process_id}: All essential files found in cache, no download needed")
             return False
             
         except ImportError:
-            print(f"⚠️ Process {self._process_id}: huggingface_hub not available, assuming download needed")
+            if self.logger:
+                self.logger.warning(f"Process {self._process_id}: huggingface_hub not available, assuming download needed")
             return True
         except Exception as e:
-            print(f"⚠️ Process {self._process_id}: Cache check failed: {e}, assuming download needed")
+            if self.logger:
+                self.logger.warning(f"Process {self._process_id}: Cache check failed: {e}, assuming download needed")
             return True
     
     def transcribe(self, 
@@ -317,31 +341,37 @@ class SpeechRecognizer:
                 if self.logger:
                     self.logger.info(f"Process {self._process_id}: Transcription lock acquired, starting transcription...")
                 
-                # 如果没有指定分块时长或者音频较短，直接转录
-                if chunk_duration is None:
-                    result = self._transcribe_chunk(audio_path)
-                else:
-                    # 获取音频时长
-                    audio_duration = self._get_audio_duration(audio_path)
+                try:
+                    # 使用原作者的方式直接调用模型的 transcribe 方法
+                    dtype = float32 if self.fp32 else bfloat16
                     
-                    if audio_duration <= chunk_duration:
-                        # 音频较短，直接处理
-                        if progress_callback:
-                            progress_callback(0, 1)
-                        
-                        result = self._transcribe_chunk(audio_path)
-                        
-                        if progress_callback:
-                            progress_callback(1, 1)
-                    else:
-                        # 音频较长，分块处理
-                        result = self._transcribe_with_chunks(
-                            audio_path, 
-                            audio_duration,
-                            chunk_duration, 
-                            overlap_duration, 
-                            progress_callback
+                    # 先尝试直接转录，如果因为内存问题失败则降级到分块处理
+                    try:
+                        result = self._model.transcribe(
+                            audio_path,
+                            dtype=dtype,
+                            chunk_duration=chunk_duration if chunk_duration else None,
+                            overlap_duration=overlap_duration,
+                            chunk_callback=lambda current, total: progress_callback(current, total) if progress_callback else None
                         )
+                        
+                        if self.logger:
+                            self.logger.info(f"Process {self._process_id}: Direct transcription completed successfully")
+                        return result
+                        
+                    except Exception as e:
+                        if self.logger:
+                            self.logger.error(f"Process {self._process_id}: All transcription attempts failed: {e}")
+                            raise e
+                        else:
+                            raise e
+                            
+                except Exception as e:
+                    if self.logger:
+                        self.logger.error(f"Process {self._process_id}: All transcription attempts failed: {e}")
+                        raise e
+                    else:
+                        raise e
             
             if self.logger:
                 self.logger.info(f"Process {self._process_id}: Transcription completed for: {audio_path}")
@@ -369,7 +399,8 @@ class SpeechRecognizer:
                 # 回退方案：假设时长
                 file_size = os.path.getsize(audio_path)
                 estimated_duration = file_size / (16000 * 2)  # 16kHz, 16-bit
-                print(f"⚠️ Process {self._process_id}: Could not get exact duration, estimating {estimated_duration:.2f}s")
+                if self.logger:
+                    self.logger.warning(f"Process {self._process_id}: Could not get exact duration, estimating {estimated_duration:.2f}s")
                 return estimated_duration
         except Exception:
             # 默认时长
@@ -382,7 +413,8 @@ class SpeechRecognizer:
             result = self._model.transcribe(audio_path)
             return result
         except Exception as e:
-            print(f"❌ Process {self._process_id}: Chunk transcription failed: {str(e)}")
+            if self.logger:
+                self.logger.error(f"Process {self._process_id}: Chunk transcription failed: {str(e)}")
             # 返回空结果而不是抛出异常 - 使用正确的构造函数参数
             return AlignedResult(text="", sentences=[])
     
@@ -398,7 +430,8 @@ class SpeechRecognizer:
         step_duration = chunk_duration - overlap_duration
         total_chunks = max(1, math.ceil((audio_duration - overlap_duration) / step_duration))
         
-        print(f"🎙️ Process {self._process_id}: Processing {total_chunks} chunks (chunk: {chunk_duration}s, overlap: {overlap_duration}s)")
+        if self.logger:
+            self.logger.info(f"Process {self._process_id}: Processing {total_chunks} chunks (chunk: {chunk_duration}s, overlap: {overlap_duration}s)")
         
         all_sentences = []
         all_words = []
@@ -409,7 +442,8 @@ class SpeechRecognizer:
                 start_time = chunk_idx * step_duration
                 end_time = min(start_time + chunk_duration, audio_duration)
                 
-                print(f"🎙️ Process {self._process_id}: Processing chunk {chunk_idx + 1}/{total_chunks} ({start_time:.1f}s - {end_time:.1f}s)")
+                if self.logger:
+                    self.logger.info(f"Process {self._process_id}: Processing chunk {chunk_idx + 1}/{total_chunks} ({start_time:.1f}s - {end_time:.1f}s)")
                 
                 # 提取音频块
                 chunk_path = self._extract_audio_chunk(audio_path, start_time, end_time)
@@ -437,14 +471,16 @@ class SpeechRecognizer:
                     progress_callback(chunk_idx + 1, total_chunks)
                     
             except Exception as e:
-                print(f"⚠️ Process {self._process_id}: Failed to process chunk {chunk_idx + 1}: {str(e)}")
+                if self.logger:
+                    self.logger.warning(f"Process {self._process_id}: Failed to process chunk {chunk_idx + 1}: {str(e)}")
                 continue
         
         # 创建最终结果 - 使用正确的构造函数参数
         # 合并所有句子的文本
         combined_text = " ".join(sentence.text for sentence in all_sentences)
         final_result = AlignedResult(text=combined_text, sentences=all_sentences)
-        print(f"🎙️ Process {self._process_id}: Transcription completed: {len(all_sentences)} sentences")
+        if self.logger:
+            self.logger.info(f"Process {self._process_id}: Transcription completed: {len(all_sentences)} sentences")
         
         return final_result
     
@@ -469,7 +505,8 @@ class SpeechRecognizer:
             if result.returncode == 0 and os.path.exists(chunk_path) and os.path.getsize(chunk_path) > 0:
                 return chunk_path
             else:
-                print(f"⚠️ Process {self._process_id}: Failed to extract audio chunk: {result.stderr}")
+                if self.logger:
+                    self.logger.warning(f"Process {self._process_id}: Failed to extract audio chunk: {result.stderr}")
                 try:
                     os.unlink(chunk_path)
                 except Exception:
@@ -477,7 +514,8 @@ class SpeechRecognizer:
                 return None
                 
         except Exception as e:
-            print(f"⚠️ Process {self._process_id}: Audio chunk extraction error: {str(e)}")
+            if self.logger:
+                self.logger.warning(f"Process {self._process_id}: Audio chunk extraction error: {str(e)}")
             return None
     
     def _merge_chunk_result(self, 
@@ -538,9 +576,13 @@ class SpeechRecognizer:
                     if hasattr(instance, '_model') and instance._model is not None:
                         # MLX 模型会自动清理，我们只需要将引用设为None
                         instance._model = None
-                    print(f"🎙️ Cleaned up SpeechRecognizer for process {current_pid}")
+                    # 使用实例的 logger 如果可用
+                    if hasattr(instance, 'logger') and instance.logger:
+                        instance.logger.info(f"Cleaned up SpeechRecognizer for process {current_pid}")
                 except Exception as e:
-                    print(f"Error cleaning up SpeechRecognizer for process {current_pid}: {e}")
+                    # 使用实例的 logger 如果可用
+                    if hasattr(instance, 'logger') and instance.logger:
+                        instance.logger.error(f"Error cleaning up SpeechRecognizer for process {current_pid}: {e}")
                 finally:
                     del cls._instances[current_pid]
     
@@ -552,11 +594,15 @@ class SpeechRecognizer:
                 try:
                     if hasattr(instance, '_model') and instance._model is not None:
                         instance._model = None
-                    print(f"🎙️ Cleaned up SpeechRecognizer for process {pid}")
+                    # 使用实例的 logger 如果可用
+                    if hasattr(instance, 'logger') and instance.logger:
+                        instance.logger.info(f"Cleaned up SpeechRecognizer for process {pid}")
                 except Exception as e:
-                    print(f"Error cleaning up SpeechRecognizer for process {pid}: {e}")
+                    if hasattr(instance, 'logger') and instance.logger:
+                        instance.logger.error(f"Error cleaning up SpeechRecognizer for process {pid}: {e}")
             cls._instances.clear()
-            print("🎙️ All SpeechRecognizer instances cleaned up")
+            # 无法使用实例logger，直接输出消息（这是最后的清理）
+            pass  # All SpeechRecognizer instances cleaned up
 
 
 class SubtitleFormatter:

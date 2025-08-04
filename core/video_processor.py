@@ -1048,8 +1048,7 @@ class VideoProcessor(QRunnable):
                 "-i", self.video_path,
                 "-vf", f"subtitles='{subtitle_path}':force_style='FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,BorderStyle=4'",
                 "-c:v", "h264_videotoolbox",
-                "-b:v", "0",  # 使用变动比特率模式
-                "-q:v", "23", # VideoToolbox质量参数调整为55，更激进的压缩
+                "-q:v", "40", # VideoToolbox质量参数调整为55，更激进的压缩
                 "-c:a", "copy",
                 "-movflags", "+faststart",  # 优化在线播放
                 output_path,
@@ -2152,7 +2151,3 @@ class MultiprocessVideoManager:
     def shutdown(self):
         """关闭多进程管理器（cleanup的别名，保持兼容性）"""
         self.cleanup()
-
-
-
-

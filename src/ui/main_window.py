@@ -153,9 +153,13 @@ class SubtitleProcessor(QWidget):
     def _ensure_multiprocess_manager(self):
         """确保多进程管理器已初始化（延迟初始化）"""
         if self.multiprocess_manager is None:
-            # 只有在真正需要时才创建多进程管理器
-            print(f"🔧 Initializing multiprocess manager with {self.max_processes} max processes")
-            self.multiprocess_manager = MultiprocessVideoManager(max_processes=self.max_processes)
+            # 根据实际任务数量动态调整进程数
+            from config import get_dynamic_max_processes
+            task_count = len(self.video_paths) if hasattr(self, 'video_paths') and self.video_paths else len(self.file_paths) if self.file_paths else 1
+            dynamic_max_processes = get_dynamic_max_processes(task_count)
+            
+            print(f"🔧 Initializing multiprocess manager: {task_count} tasks -> {dynamic_max_processes} processes (max configured: {self.max_processes})")
+            self.multiprocess_manager = MultiprocessVideoManager(max_processes=dynamic_max_processes)
 
     def init_ui(self):
         main_layout = QVBoxLayout()

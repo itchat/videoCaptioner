@@ -29,6 +29,51 @@ def _get_default_max_processes():
     except Exception:
         return 1  # 默认值
 
+def get_dynamic_max_processes(task_count):
+    """根据实际任务数量动态调整最大进程数，避免不必要的内存分配"""
+    if task_count <= 0:
+        return 1
+    
+    # 获取配置的最大进程数作为上限
+    max_allowed = MAX_PROCESSES
+    
+    # 根据任务数量动态调整，但不超过配置的最大值
+    if task_count == 1:
+        return 1  # 单任务不需要多进程
+    elif task_count == 2:
+        return min(2, max_allowed)
+    elif task_count <= 4:
+        return min(task_count, max_allowed)
+    else:
+        # 多任务时使用配置的最大值，但考虑内存限制
+        try:
+            if platform.system() == 'Darwin':  # macOS
+                # 检测是否是Apple Silicon，并根据内存情况调整
+                result = subprocess.run(['sysctl', '-n', 'hw.optional.arm64'], 
+                                      capture_output=True, text=True, timeout=5)
+                if result.returncode == 0 and result.stdout.strip() == '1':
+                    # Apple Silicon - 检查内存
+                    try:
+                        mem_result = subprocess.run(['sysctl', '-n', 'hw.memsize'], 
+                                                  capture_output=True, text=True, timeout=5)
+                        if mem_result.returncode == 0:
+                            mem_bytes = int(mem_result.stdout.strip())
+                            mem_gb = mem_bytes / (1024**3)
+                            
+                            if mem_gb >= 32:  # 32GB+ 内存
+                                return min(max_allowed, task_count)
+                            elif mem_gb >= 16:  # 16GB+ 内存
+                                return min(max_allowed, 3)
+                            else:  # 16GB 以下内存
+                                return min(max_allowed, 2)
+                    except Exception:
+                        pass
+                return min(max_allowed, 2)  # Intel Mac 保守一些
+            else:
+                return min(max_allowed, 2)  # 其他系统保守一些
+        except Exception:
+            return min(max_allowed, task_count)
+
 DEFAULT_MAX_PROCESSES = _get_default_max_processes()
 
 # API重试配置默认值
