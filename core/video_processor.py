@@ -313,7 +313,7 @@ class VideoProcessor(QRunnable):
         return {
             'audio': os.path.join(self.cache_dir, f"{base_name}_audio.wav"),  # 音频文件保持在cache目录
             'srt': os.path.join(video_dir, f"{base_name}_en.srt"),  # 原字幕保存到视频目录
-            'bilingual_srt': os.path.join(video_dir, f"{base_name}_zh.srt"),  # 双语字幕保存到视频目录
+            'bilingual_srt': os.path.join(video_dir, f"{base_name}_bi.srt"),  # 双语字幕保存到视频目录
             'output_video': os.path.join(
                 video_dir,  # 输出视频也保存到视频目录
                 f"{base_name}_subtitled_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
