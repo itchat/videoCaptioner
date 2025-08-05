@@ -107,6 +107,13 @@ class ApiSettingsDialog(QDialog):
         self.model_combo.setFixedHeight(32)
         layout.addWidget(self.model_combo)
         
+        layout.addSpacing(8)  # 添加间距
+
+        # Skip Subtitle Burning Checkbox
+        self.skip_burning_checkbox = QCheckBox("Skip Subtitles Burning", self)
+        self.skip_burning_checkbox.setChecked(self.api_settings.get("skip_subtitle_burning", DEFAULT_SKIP_SUBTITLE_BURNING))
+        layout.addWidget(self.skip_burning_checkbox)
+
         # 移除stretch，让布局紧凑
         return layout
 
@@ -150,13 +157,6 @@ class ApiSettingsDialog(QDialog):
         self.max_processes_spinbox.setFixedHeight(32)
         layout.addWidget(self.max_processes_spinbox)
         
-        layout.addSpacing(8)  # 添加间距
-        
-        # Skip Subtitle Burning Checkbox
-        self.skip_burning_checkbox = QCheckBox("Skip burning subtitles into video", self)
-        self.skip_burning_checkbox.setChecked(self.api_settings.get("skip_subtitle_burning", DEFAULT_SKIP_SUBTITLE_BURNING))
-        layout.addWidget(self.skip_burning_checkbox)
-        
         # 移除stretch，让布局紧凑
         return layout
 
@@ -165,8 +165,8 @@ class ApiSettingsDialog(QDialog):
         layout = QVBoxLayout()
         layout.setSpacing(12)  # 减小间距
         
-        prompt_title = QLabel("Custom Translation Prompt", self)
-        layout.addWidget(prompt_title)
+        # prompt_title = QLabel("Custom Translation Prompt", self)
+        # layout.addWidget(prompt_title)
         
         self.prompt_text = QTextEdit(self)
         self.prompt_text.setPlainText(self.api_settings.get("custom_prompt", ""))

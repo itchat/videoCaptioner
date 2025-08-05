@@ -267,7 +267,7 @@ class SubtitleProcessor(QWidget):
         for file_path in self.file_paths:
             base_name = os.path.basename(file_path)
             progress_widget = ProgressWidget(base_name)
-            self.progress_widgets[base_name] = progress_widget
+            self.progress_widgets[file_path] = progress_widget  # 使用完整路径作为键
             self.progress_layout.addWidget(progress_widget)
         
         # 如果有进度条，启用清除按钮
@@ -362,32 +362,31 @@ class SubtitleProcessor(QWidget):
             progress_updates = self.multiprocess_manager.get_progress_updates()
             for update in progress_updates:
                 if update['type'] == 'progress':
-                    self.update_file_progress(update['base_name'], update['progress'])
+                    self.update_file_progress(update['video_path'], update['progress'])
                     if 'elapsed_time' in update:
-                        self.update_file_timer(update['base_name'], update['elapsed_time'])
+                        self.update_file_timer(update['video_path'], update['elapsed_time'])
                 elif update['type'] == 'status':
-                    self.update_file_status(update['base_name'], update['status'])
+                    self.update_file_status(update['video_path'], update['status'])
             
             # 获取处理结果
             results = self.multiprocess_manager.get_results()
             for result in results:
                 process_id = result['process_id']
                 video_path = result['video_path']
-                base_name = os.path.basename(video_path)
                 
                 if process_id in self.active_process_ids:
                     self.active_process_ids.remove(process_id)
                     self.completed_processes += 1
                     
                     if result['status'] == 'success':
-                        print(f"✅ Process {process_id} completed successfully: {base_name}")
-                        if base_name in self.progress_widgets:
-                            self.progress_widgets[base_name].update_status("Processing completed!")
-                            self.progress_widgets[base_name].update_progress(100)
+                        print(f"✅ Process {process_id} completed successfully: {os.path.basename(video_path)}")
+                        if video_path in self.progress_widgets:
+                            self.progress_widgets[video_path].update_status("Processing completed!")
+                            self.progress_widgets[video_path].update_progress(100)
                     elif result['status'] == 'error':
                         error_msg = result.get('error', 'Unknown error')
-                        print(f"❌ Process {process_id} failed: {base_name} - {error_msg}")
-                        self.handle_error(f"Failed to process {base_name}: {error_msg}")
+                        print(f"❌ Process {process_id} failed: {os.path.basename(video_path)} - {error_msg}")
+                        self.handle_error(f"Failed to process {os.path.basename(video_path)}: {error_msg}")
                     
                     # 检查是否所有进程都已完成
                     if self.completed_processes >= self.total_processes:
@@ -411,17 +410,17 @@ class SubtitleProcessor(QWidget):
             self, "Processing", "All processing is complete!", QMessageBox.StandardButton.Ok
         )
 
-    def update_file_progress(self, file_name, progress):
-        if file_name in self.progress_widgets:
-            self.progress_widgets[file_name].update_progress(progress)
+    def update_file_progress(self, file_path, progress):
+        if file_path in self.progress_widgets:
+            self.progress_widgets[file_path].update_progress(progress)
 
-    def update_file_status(self, file_name, status):
-        if file_name in self.progress_widgets:
-            self.progress_widgets[file_name].update_status(status)
+    def update_file_status(self, file_path, status):
+        if file_path in self.progress_widgets:
+            self.progress_widgets[file_path].update_status(status)
 
-    def update_file_timer(self, file_name, elapsed_time):
-        if file_name in self.progress_widgets:
-            self.progress_widgets[file_name].update_timer(elapsed_time)
+    def update_file_timer(self, file_path, elapsed_time):
+        if file_path in self.progress_widgets:
+            self.progress_widgets[file_path].update_timer(elapsed_time)
 
     def handle_error(self, error_message):
         """处理错误 - 多进程版本"""
