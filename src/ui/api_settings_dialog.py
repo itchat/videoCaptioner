@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdi
 from PyQt6.QtCore import Qt
 from config import (OPENAI_CUSTOM_PROMPT, DEFAULT_CUSTOM_PROMPT, DEFAULT_MAX_CHARS_PER_BATCH, 
                    DEFAULT_MAX_ENTRIES_PER_BATCH, DEFAULT_MAX_PROCESSES, OPENAI_BASE_URL, OPENAI_MODEL,
-                   DEFAULT_SKIP_SUBTITLE_BURNING)
+                   DEFAULT_SKIP_SUBTITLE_BURNING, DEFAULT_SKIP_TRANSLATION)
 
 
 class ApiSettingsDialog(QDialog):
@@ -17,7 +17,8 @@ class ApiSettingsDialog(QDialog):
             "max_chars_per_batch": DEFAULT_MAX_CHARS_PER_BATCH,
             "max_entries_per_batch": DEFAULT_MAX_ENTRIES_PER_BATCH,
             "max_processes": DEFAULT_MAX_PROCESSES,
-            "skip_subtitle_burning": DEFAULT_SKIP_SUBTITLE_BURNING
+            "skip_subtitle_burning": DEFAULT_SKIP_SUBTITLE_BURNING,
+            "skip_translation": DEFAULT_SKIP_TRANSLATION
         }
         self.initUI()
 
@@ -64,7 +65,7 @@ class ApiSettingsDialog(QDialog):
         layout = QVBoxLayout()
         layout.setSpacing(12)  # 统一间距
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)  # 顶部对齐
-        
+
         # Base URL
         layout.addWidget(self.create_label("Base URL"))
         self.base_url_input = QLineEdit(self)
@@ -73,9 +74,9 @@ class ApiSettingsDialog(QDialog):
         # 设置合适的高度
         self.base_url_input.setFixedHeight(32)
         layout.addWidget(self.base_url_input)
-        
+
         layout.addSpacing(8)  # 统一间距
-        
+
         # API Key (必填)
         api_key_label = QLabel("API Key", self)
         layout.addWidget(api_key_label)
@@ -86,33 +87,38 @@ class ApiSettingsDialog(QDialog):
         # 设置合适的高度
         self.api_key_input.setFixedHeight(32)
         layout.addWidget(self.api_key_input)
-        
+
         layout.addSpacing(8)  # 统一间距
-        
+
         # Model
         layout.addWidget(self.create_label("Model"))
         self.model_combo = QComboBox(self)
         models = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1-nano"]
         self.model_combo.addItems(models)
         self.model_combo.setEditable(True)
-        
+
         current_model = self.api_settings.get("model", OPENAI_MODEL)
         if current_model in models:
             self.model_combo.setCurrentText(current_model)
         else:
             self.model_combo.addItem(current_model)
             self.model_combo.setCurrentText(current_model)
-        
+
         # 设置合适的高度
         self.model_combo.setFixedHeight(32)
         layout.addWidget(self.model_combo)
-        
+
         layout.addSpacing(8)  # 添加间距
 
-        # Skip Subtitle Burning Checkbox
-        self.skip_burning_checkbox = QCheckBox("Skip Subtitles Burning", self)
-        self.skip_burning_checkbox.setChecked(self.api_settings.get("skip_subtitle_burning", DEFAULT_SKIP_SUBTITLE_BURNING))
-        layout.addWidget(self.skip_burning_checkbox)
+        # Skip Translation (toggle button, no confirmation; clicking toggles state)
+        self.skip_translation_enabled = self.api_settings.get("skip_translation", DEFAULT_SKIP_TRANSLATION)
+        self.skip_translation_button = QPushButton("Skip Translation", self)
+        self.skip_translation_button.setCheckable(True)
+        self.skip_translation_button.setFixedHeight(28)
+        self.skip_translation_button.setChecked(self.skip_translation_enabled)
+        self.update_skip_translation_style()
+        self.skip_translation_button.clicked.connect(self.on_skip_translation_toggled)
+        layout.addWidget(self.skip_translation_button)
 
         # 移除stretch，让布局紧凑
         return layout
@@ -156,6 +162,17 @@ class ApiSettingsDialog(QDialog):
         # 设置合适的高度
         self.max_processes_spinbox.setFixedHeight(32)
         layout.addWidget(self.max_processes_spinbox)
+
+        layout.addSpacing(8)  # 统一间距
+        # Skip Subtitle Burning (toggle button to visually match Skip Translation)
+        self.skip_burning_enabled = self.api_settings.get("skip_subtitle_burning", DEFAULT_SKIP_SUBTITLE_BURNING)
+        self.skip_burning_button = QPushButton("Skip Subtitles Burning", self)
+        self.skip_burning_button.setCheckable(True)
+        self.skip_burning_button.setFixedHeight(28)
+        self.skip_burning_button.setChecked(self.skip_burning_enabled)
+        self.update_skip_burning_style()
+        self.skip_burning_button.clicked.connect(self.on_skip_burning_toggled)
+        layout.addWidget(self.skip_burning_button)
         
         # 移除stretch，让布局紧凑
         return layout
@@ -199,6 +216,31 @@ class ApiSettingsDialog(QDialog):
         
         return layout
 
+    def on_skip_translation_clicked(self):
+        # Deprecated: kept for compatibility but toggling is now handled by on_skip_translation_toggled
+        pass
+
+    def on_skip_burning_toggled(self):
+        self.skip_burning_enabled = bool(self.skip_burning_button.isChecked())
+        self.update_skip_burning_style()
+
+    def on_skip_translation_toggled(self):
+        self.skip_translation_enabled = bool(self.skip_translation_button.isChecked())
+        self.update_skip_translation_style()
+
+    def update_skip_burning_style(self):
+        # Visual change when enabled
+        if self.skip_burning_enabled:
+            self.skip_burning_button.setText("Skip Subtitles Burning ✓")
+        else:
+            self.skip_burning_button.setText("Skip Subtitles Burning")
+
+    def update_skip_translation_style(self):
+        if self.skip_translation_enabled:
+            self.skip_translation_button.setText("Skip Translation ✓")
+        else:
+            self.skip_translation_button.setText("Skip Translation")
+
     def create_label(self, text):
         """创建普通标签"""
         label = QLabel(text, self)
@@ -215,7 +257,7 @@ class ApiSettingsDialog(QDialog):
         max_chars_per_batch = self.max_chars_spinbox.value()
         max_entries_per_batch = self.max_entries_spinbox.value()
         max_processes = self.max_processes_spinbox.value()
-        skip_subtitle_burning = self.skip_burning_checkbox.isChecked()
+        skip_subtitle_burning = self.skip_burning_button.isChecked()
 
         # 只验证 API Key 是否为空
         if not api_key:
@@ -243,7 +285,7 @@ class ApiSettingsDialog(QDialog):
             custom_prompt = DEFAULT_CUSTOM_PROMPT
             self.prompt_text.setPlainText(custom_prompt)
 
-        # 更新设置字典
+    # 更新设置字典
         self.api_settings["base_url"] = base_url
         self.api_settings["api_key"] = api_key
         self.api_settings["model"] = model
@@ -251,11 +293,14 @@ class ApiSettingsDialog(QDialog):
         self.api_settings["max_chars_per_batch"] = max_chars_per_batch
         self.api_settings["max_entries_per_batch"] = max_entries_per_batch
         self.api_settings["max_processes"] = max_processes
-        self.api_settings["skip_subtitle_burning"] = skip_subtitle_burning
+        # persist the toggle states
+        # if user toggled via buttons, prefer those states
+        self.api_settings["skip_subtitle_burning"] = getattr(self, 'skip_burning_enabled', skip_subtitle_burning)
+        self.api_settings["skip_translation"] = getattr(self, 'skip_translation_enabled', DEFAULT_SKIP_TRANSLATION)
 
         # 显示成功消息
         QMessageBox.information(self, "Settings Saved", 
-                              "Settings have been saved successfully!")
+                    "Settings have been saved successfully!")
 
         # 关闭对话框
         self.accept()
@@ -268,4 +313,11 @@ class ApiSettingsDialog(QDialog):
         self.max_chars_spinbox.setValue(DEFAULT_MAX_CHARS_PER_BATCH)
         self.max_entries_spinbox.setValue(DEFAULT_MAX_ENTRIES_PER_BATCH)
         self.max_processes_spinbox.setValue(DEFAULT_MAX_PROCESSES)
-        self.skip_burning_checkbox.setChecked(DEFAULT_SKIP_SUBTITLE_BURNING)
+        # reset toggle buttons to defaults
+        self.skip_burning_enabled = DEFAULT_SKIP_SUBTITLE_BURNING
+        self.skip_burning_button.setChecked(self.skip_burning_enabled)
+        self.update_skip_burning_style()
+
+        self.skip_translation_enabled = DEFAULT_SKIP_TRANSLATION
+        self.skip_translation_button.setChecked(self.skip_translation_enabled)
+        self.update_skip_translation_style()

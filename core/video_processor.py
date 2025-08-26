@@ -246,6 +246,16 @@ class VideoProcessor(QRunnable):
             self.report_status("Translating subtitles...")
             with open(cache_paths['srt'], "r", encoding="utf-8") as f:
                 lines = f.readlines()
+
+            # Short-circuit: if user chose to skip translation, finish after generating _en.txt
+            skip_translation = self.api_settings.get('skip_translation', False)
+            if skip_translation:
+                self.logger.info("User opted to skip translation; finishing after exporting _en.txt")
+                self.report_status("Recognition completed — translation skipped")
+                self.report_progress(100)
+                self.signals.finished.emit()
+                return
+
             translated_content = self.translate_subtitles(lines)
             
             # Check if bilingual subtitles are empty before proceeding
@@ -312,7 +322,7 @@ class VideoProcessor(QRunnable):
         video_dir = os.path.dirname(self.video_path)  # 视频文件所在目录
         return {
             'audio': os.path.join(self.cache_dir, f"{base_name}_audio.wav"),  # 音频文件保持在cache目录
-            'srt': os.path.join(video_dir, f"{base_name}_en.srt"),  # 原字幕保存到视频目录
+            'srt': os.path.join(video_dir, f"{base_name}_en.txt"),  # 原字幕保存到视频目录
             'bilingual_srt': os.path.join(video_dir, f"{base_name}_bi.srt"),  # 双语字幕保存到视频目录
             'output_video': os.path.join(
                 video_dir,  # 输出视频也保存到视频目录

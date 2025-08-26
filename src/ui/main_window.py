@@ -98,7 +98,8 @@ class SubtitleProcessor(QWidget):
             "max_chars_per_batch": OPENAI_MAX_CHARS_PER_BATCH,
             "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH,
             "max_processes": MAX_PROCESSES,
-            "skip_subtitle_burning": SKIP_SUBTITLE_BURNING  # 从config加载
+            "skip_subtitle_burning": SKIP_SUBTITLE_BURNING,  # 从config加载
+            "skip_translation": False
         }
         
         # 初始化多进程管理器而不是线程池
@@ -460,7 +461,8 @@ class SubtitleProcessor(QWidget):
                 self.api_settings["max_chars_per_batch"],
                 self.api_settings["max_entries_per_batch"],
                 self.api_settings["max_processes"],
-                skip_subtitle_burning=self.api_settings["skip_subtitle_burning"]
+                skip_subtitle_burning=self.api_settings["skip_subtitle_burning"],
+                skip_translation=self.api_settings.get("skip_translation", False)
             )
 
             # QMessageBox.information(
