@@ -128,15 +128,22 @@ class SpeechRecognizer:
                                     self.status_callback("Initializing model download...")
                                 elif self.status_callback:
                                     self.status_callback("Loading cached model...")
-                                    
-                                # 使用新的 parakeet_mlx API
-                                if needs_download and self.status_callback:
-                                    self.status_callback(f"Downloading {self.model_name}...")
-                                    
-                                # 加载模型
-                                if self.logger:
-                                    self.logger.info(f"Process {self._process_id}: Loading model from {'cache' if not needs_download else 'download'}")
-                                self._model = from_pretrained(self.model_name)
+                                
+                                # 加载模型，添加重试机制
+                                max_retries = 3
+                                for attempt in range(max_retries):
+                                    try:
+                                        if self.logger:
+                                            self.logger.info(f"Process {self._process_id}: Loading model from {'cache' if not needs_download else 'download'} (attempt {attempt + 1})")
+                                        self._model = from_pretrained(self.model_name)
+                                        break
+                                    except Exception as e:
+                                        if attempt == max_retries - 1:
+                                            raise e
+                                        if self.logger:
+                                            self.logger.warning(f"Process {self._process_id}: Model loading failed (attempt {attempt + 1}), retrying: {e}")
+                                        import time
+                                        time.sleep(2 ** attempt)  # 指数退避
                                 
                                 # 释放锁（函数结束时自动释放）
                                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -157,9 +164,20 @@ class SpeechRecognizer:
                                 
                                 if self.status_callback:
                                     self.status_callback("Loading cached model...")
-                                    
-                                # 直接加载已缓存的模型
-                                self._model = from_pretrained(self.model_name)
+                                
+                                # 直接加载已缓存的模型，添加重试机制
+                                max_retries = 3
+                                for attempt in range(max_retries):
+                                    try:
+                                        self._model = from_pretrained(self.model_name)
+                                        break
+                                    except Exception as e:
+                                        if attempt == max_retries - 1:
+                                            raise e
+                                        if self.logger:
+                                            self.logger.warning(f"Process {self._process_id}: Cached model loading failed (attempt {attempt + 1}), retrying: {e}")
+                                        import time
+                                        time.sleep(2 ** attempt)
                                 
                                 # 释放锁
                                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
@@ -177,8 +195,20 @@ class SpeechRecognizer:
                             self.status_callback("Initializing model download...")
                         elif self.status_callback:
                             self.status_callback("Loading cached model...")
-                            
-                        self._model = from_pretrained(self.model_name)
+                        
+                        # 添加重试机制
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                self._model = from_pretrained(self.model_name)
+                                break
+                            except Exception as e:
+                                if attempt == max_retries - 1:
+                                    raise e
+                                if self.logger:
+                                    self.logger.warning(f"Process {self._process_id}: Model loading failed (attempt {attempt + 1}), retrying: {e}")
+                                import time
+                                time.sleep(2 ** attempt)
                 else:
                     # fcntl不可用，直接加载模型
                     if self.logger:
@@ -193,7 +223,19 @@ class SpeechRecognizer:
                     elif self.status_callback:
                         self.status_callback("Loading cached model...")
                         
-                    self._model = from_pretrained(self.model_name)
+                    # 添加重试机制
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            self._model = from_pretrained(self.model_name)
+                            break
+                        except Exception as e:
+                            if attempt == max_retries - 1:
+                                raise e
+                            if self.logger:
+                                self.logger.warning(f"Process {self._process_id}: Model loading failed (attempt {attempt + 1}), retrying: {e}")
+                            import time
+                            time.sleep(2 ** attempt)
                     
                 # 配置模型参数
                 try:

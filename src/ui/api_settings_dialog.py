@@ -258,6 +258,7 @@ class ApiSettingsDialog(QDialog):
         max_entries_per_batch = self.max_entries_spinbox.value()
         max_processes = self.max_processes_spinbox.value()
         skip_subtitle_burning = self.skip_burning_button.isChecked()
+        skip_translation = self.skip_translation_button.isChecked()
 
         # 只验证 API Key 是否为空
         if not api_key:
@@ -293,10 +294,9 @@ class ApiSettingsDialog(QDialog):
         self.api_settings["max_chars_per_batch"] = max_chars_per_batch
         self.api_settings["max_entries_per_batch"] = max_entries_per_batch
         self.api_settings["max_processes"] = max_processes
-        # persist the toggle states
-        # if user toggled via buttons, prefer those states
-        self.api_settings["skip_subtitle_burning"] = getattr(self, 'skip_burning_enabled', skip_subtitle_burning)
-        self.api_settings["skip_translation"] = getattr(self, 'skip_translation_enabled', DEFAULT_SKIP_TRANSLATION)
+        # persist the toggle states from actual button states
+        self.api_settings["skip_subtitle_burning"] = skip_subtitle_burning
+        self.api_settings["skip_translation"] = skip_translation
 
         # 显示成功消息
         QMessageBox.information(self, "Settings Saved", 

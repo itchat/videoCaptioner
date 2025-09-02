@@ -74,7 +74,18 @@ def main():
     signal.signal(signal.SIGTERM, signal_handler)
     
     # 连接应用退出信号到清理函数
-    app.aboutToQuit.connect(lambda: window.central_widget.cleanup_on_exit() if hasattr(window.central_widget, 'cleanup_on_exit') else None)
+    def cleanup_and_quit():
+        """Proper cleanup function for macOS"""
+        try:
+            if hasattr(window, 'central_widget') and hasattr(window.central_widget, 'cleanup_on_exit'):
+                window.central_widget.cleanup_on_exit()
+            # Force garbage collection to prevent Qt crashes
+            import gc
+            gc.collect()
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+    
+    app.aboutToQuit.connect(cleanup_and_quit)
     
     window.show()
     sys.exit(app.exec())

@@ -485,7 +485,7 @@ class VideoProcessor(QRunnable):
                 progress_callback=lambda percentage, downloaded_mb, total_mb, speed_mbps: (
                     self.signals.download_progress.emit(percentage, downloaded_mb, total_mb, speed_mbps),
                     self.signals.download_completed.emit() if percentage == 100 else None
-                )[0],  # 只返回第一个结果
+                ),
                 status_callback=lambda message: self.signals.download_status.emit(message)
             )
             self.logger.info("Parakeet MLX model instance obtained successfully")
@@ -1270,6 +1270,21 @@ class VideoProcessorForMultiprocess:
             self.report_status("Recognizing speech...")
             self.generate_subtitles(cache_paths['audio'], cache_paths['srt'])
             self.report_progress(70)
+            
+            # 检查是否需要跳过翻译
+            skip_translation = self.api_settings.get('skip_translation', False)
+            if skip_translation:
+                self.logger.info("User opted to skip translation; finishing after generating _en.txt")
+                self.report_status("Recognition completed — translation skipped")
+                self.report_progress(100)
+                return {
+                    'status': 'completed',
+                    'subtitle_path': cache_paths['srt'],
+                    'original_subtitle_path': cache_paths['srt'],
+                    'cache_paths': cache_paths,
+                    'skipped_translation': True,
+                    'skipped_burning': True
+                }
             
             # 字幕翻译 (70-80%)
             self.report_status("Translating subtitles...")

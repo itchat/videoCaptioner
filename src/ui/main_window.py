@@ -19,7 +19,7 @@ from .progress_widget import ProgressWidget
 from .api_settings_dialog import ApiSettingsDialog
 from .download_dialog import DownloadDialog
 from core.video_processor import MultiprocessVideoManager
-from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES, save_config, SKIP_SUBTITLE_BURNING
+from config import OPENAI_BASE_URL, OPENAI_API_KEY, OPENAI_MODEL, OPENAI_CUSTOM_PROMPT, OPENAI_MAX_CHARS_PER_BATCH, OPENAI_MAX_ENTRIES_PER_BATCH, MAX_PROCESSES, save_config, SKIP_SUBTITLE_BURNING, SKIP_TRANSLATION
 import multiprocessing as mp
 
 
@@ -72,14 +72,23 @@ class MainWindow(QMainWindow):
                 event.ignore()
                 return
 
-        # 清理多进程管理器资源
-        if hasattr(self.central_widget, 'multiprocess_manager'):
-            self.central_widget.multiprocess_manager.shutdown()
-        
-        # 清理其他资源
-        self.central_widget.cleanup_on_exit()
-        self.central_widget.reset_ui_state()
-        event.accept()
+        try:
+            # 清理多进程管理器资源
+            if hasattr(self.central_widget, 'multiprocess_manager') and self.central_widget.multiprocess_manager:
+                self.central_widget.multiprocess_manager.shutdown()
+            
+            # 清理其他资源
+            if hasattr(self.central_widget, 'cleanup_on_exit'):
+                self.central_widget.cleanup_on_exit()
+            
+            # 停止所有定时器
+            if hasattr(self.central_widget, 'process_timer') and self.central_widget.process_timer:
+                self.central_widget.process_timer.stop()
+                
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        finally:
+            event.accept()
 
 
 class SubtitleProcessor(QWidget):
@@ -99,7 +108,7 @@ class SubtitleProcessor(QWidget):
             "max_entries_per_batch": OPENAI_MAX_ENTRIES_PER_BATCH,
             "max_processes": MAX_PROCESSES,
             "skip_subtitle_burning": SKIP_SUBTITLE_BURNING,  # 从config加载
-            "skip_translation": False
+            "skip_translation": SKIP_TRANSLATION
         }
         
         # 初始化多进程管理器而不是线程池
@@ -486,7 +495,9 @@ class SubtitleProcessor(QWidget):
         self.settings_button.setEnabled(True)
         
         # 清理处理器列表
-        self.active_processors.clear()
+        self.active_process_ids.clear()
+        self.completed_processes = 0
+        self.total_processes = 0
 
         # 清理进度显示区域
         while self.progress_layout.count():
@@ -517,13 +528,29 @@ class SubtitleProcessor(QWidget):
         """应用退出时的清理工作 - 多进程版本"""
         try:
             # 停止定时器
-            if hasattr(self, 'process_timer'):
+            if hasattr(self, 'process_timer') and self.process_timer:
                 self.process_timer.stop()
+                self.process_timer.deleteLater()
+                self.process_timer = None
             
             # 关闭多进程管理器
             if hasattr(self, 'multiprocess_manager') and self.multiprocess_manager is not None:
                 self.multiprocess_manager.shutdown()
+                self.multiprocess_manager = None
                 
+            # 清理所有进度小部件以防止Qt崩溃
+            try:
+                while self.progress_layout.count():
+                    child = self.progress_layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+            except:
+                pass
+                
+            # 清空数据结构
+            self.progress_widgets.clear()
+            self.active_process_ids.clear()
+            
         except Exception as e:
             print(f"Cleanup error: {e}")  # 使用print避免日志问题
 
